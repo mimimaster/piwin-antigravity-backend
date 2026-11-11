@@ -1,0 +1,345 @@
+import { resolveAntigravityAppDataDir } from './binary.js';
+import { antigravityCapabilities, DEFAULT_ANTIGRAVITY_OPTIONS } from './capabilities.js';
+import { errFrame, eventFrame, okFrame } from './frames.js';
+import { reconstructAntigravityHistory } from './history.js';
+import { splitCombinedModelAndEffort } from './options.js';
+import { AcpSessionProjector, normalizePermissionOptions } from './projector.js';
+import { buildAcpPromptBlocks } from './prompt-content.js';
+import type { HostIO } from './plugin.js';
+import type {
+  AcpPort,
+  Frame,
+  Scope,
+  SessionBackendOptions,
+  SessionEmission,
+  SlashCommandDescriptor,
+} from './types.js';
+
+export type SessionSlot = {
+  cwd: string;
+  backendSessionId: string;
+  appDataDir: 'antigravity' | 'antigravity-cli';
+  projector: AcpSessionProjector;
+  commands: SlashCommandDescriptor[];
+  replay: SessionEmission[];
+  cancelled: boolean;
+  runningPrompt: boolean;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+export async function openAntigravitySession(input: {
+  frame: Extract<Frame, { kind: 'request' }>;
+  io: HostIO;
+  sessions: Map<string, SessionSlot>;
+  ensureAcp: (appDataDir: 'antigravity' | 'antigravity-cli') => Promise<AcpPort>;
+  agentVersion?: string;
+  homeDir?: string;
+  fileExists?: (path: string) => boolean;
+  readHistoryFile?: (path: string) => string | undefined;
+}): Promise<void> {
+  const { frame, io, sessions, ensureAcp } = input;
+  if (frame.scope.kind !== 'session') {
+    io.write(errFrame(frame, 'invalid-request', 'session scope required'));
+    return;
+  }
+  const params = asRecord(frame.params);
+  const cwd = typeof params?.cwd === 'string' && params.cwd.length > 0 ? params.cwd : process.cwd();
+  const binding = asRecord(params?.binding);
+  const storedId = typeof binding?.backendSessionId === 'string' ? binding.backendSessionId.trim() : '';
+
+  if ((frame.method === 'session/load' || frame.method === 'session/resume') && storedId.length === 0) {
+    io.write(errFrame(frame, 'invalid-request', 'native session id required'));
+    return;
+  }
+
+  const existing = sessions.get(frame.scope.sessionId);
+  if (frame.method !== 'session/new' && existing && existing.backendSessionId === storedId) {
+    io.write(
+      okFrame(frame, {
+        backendSessionId: existing.backendSessionId,
+        ...(input.agentVersion !== undefined ? { agentVersion: input.agentVersion } : {}),
+        capabilities: antigravityCapabilities(),
+        options: existing.projector.getOptions(),
+        replayEvents: frame.method === 'session/load' ? existing.replay : [],
+      }),
+    );
+    return;
+  }
+
+  const appDataDir = resolveAntigravityAppDataDir(
+    frame.method === 'session/new' ? undefined : storedId,
+    {
+      ...(input.homeDir !== undefined ? { homeDir: input.homeDir } : {}),
+      ...(input.fileExists !== undefined ? { fileExists: input.fileExists } : {}),
+    },
+  );
+  const acp = await ensureAcp(appDataDir);
+  const projector = new AcpSessionProjector(DEFAULT_ANTIGRAVITY_OPTIONS);
+  const replay: SessionEmission[] = [];
+  let commands: SlashCommandDescriptor[] = [];
+
+  const stopCollect = acp.onNotification((method, noteParams) => {
+    if (method !== 'session/update') return;
+    const rec = asRecord(noteParams);
+    if (!rec) return;
+    if (storedId.length > 0 && typeof rec.sessionId === 'string' && rec.sessionId !== storedId) return;
+    const update = asRecord(rec.update);
+    if (!update) return;
+    for (const emission of projector.projectSessionUpdate(update)) {
+      if (emission.type === 'commands') {
+        commands = [...emission.commands];
+      }
+      replay.push(emission);
+    }
+  });
+
+  let rpcResult: Record<string, unknown> | undefined;
+  try {
+    const rpcMethod =
+      frame.method === 'session/new'
+        ? 'session/new'
+        : frame.method === 'session/load'
+          ? 'session/load'
+          : 'session/resume';
+    const rpcParams =
+      frame.method === 'session/new'
+        ? { cwd, mcpServers: [] }
+        : { sessionId: storedId, cwd, mcpServers: [] };
+    rpcResult = asRecord(await acp.request(rpcMethod, rpcParams));
+  } finally {
+    stopCollect();
+  }
+
+  replay.push(...projector.flushActiveMessage());
+
+  const backendSessionId =
+    typeof rpcResult?.sessionId === 'string' && rpcResult.sessionId.length > 0
+      ? rpcResult.sessionId
+      : storedId;
+  if (!backendSessionId) {
+    io.write(errFrame(frame, 'backend-error', 'Antigravity ACP did not return a sessionId'));
+    return;
+  }
+
+  const options = projector.updateOptionsFromPayload(rpcResult);
+  if (frame.method === 'session/load' && !replay.some((e) => e.type === 'agent')) {
+    const fallbackHistory = reconstructAntigravityHistory({
+      sessionId: backendSessionId,
+      ...(input.homeDir !== undefined ? { homeDir: input.homeDir } : {}),
+      ...(input.readHistoryFile !== undefined ? { readFile: input.readHistoryFile } : {}),
+    });
+    if (fallbackHistory.ok) {
+      replay.push(...fallbackHistory.events);
+    }
+  }
+
+  const slot: SessionSlot = {
+    cwd,
+    backendSessionId,
+    appDataDir,
+    projector,
+    commands,
+    replay,
+    cancelled: false,
+    runningPrompt: false,
+  };
+  sessions.set(frame.scope.sessionId, slot);
+
+  if (commands.length > 0) {
+    io.write(eventFrame(frame.scope, { type: 'commands', commands }));
+  }
+
+  io.write(
+    okFrame(frame, {
+      backendSessionId,
+      ...(input.agentVersion !== undefined ? { agentVersion: input.agentVersion } : {}),
+      capabilities: antigravityCapabilities(),
+      options,
+      replayEvents: frame.method === 'session/new' ? [] : replay,
+    }),
+  );
+}
+
+export async function runAntigravityPrompt(input: {
+  frame: Extract<Frame, { kind: 'request' }>;
+  io: HostIO;
+  slot: SessionSlot;
+  acp: AcpPort;
+  readMediaFile?: (path: string) => Buffer | undefined;
+}): Promise<void> {
+  const { frame, io, slot, acp, readMediaFile } = input;
+  const sessionScope = frame.scope as Extract<Scope, { kind: 'session' }>;
+  const params = asRecord(frame.params);
+  const runId = typeof params?.runId === 'string' && params.runId.length > 0 ? params.runId : undefined;
+  const promptInput = asRecord(params?.input);
+  const text = typeof promptInput?.text === 'string' ? promptInput.text : '';
+  const built = buildAcpPromptBlocks(text, promptInput?.attachments, readMediaFile);
+  if (!built.ok) {
+    io.write(errFrame(frame, 'invalid-request', built.reason));
+    return;
+  }
+
+  slot.cancelled = false;
+  slot.runningPrompt = true;
+  slot.projector.setRunId(runId);
+
+  const emit = (emission: SessionEmission): void => {
+    if (emission.type === 'commands') {
+      slot.commands = [...emission.commands];
+    }
+    slot.replay.push(emission);
+    io.write(eventFrame(sessionScope, emission));
+  };
+
+  const stopNotes = acp.onNotification((method, noteParams) => {
+    if (method !== 'session/update') return;
+    const rec = asRecord(noteParams);
+    if (!rec || (typeof rec.sessionId === 'string' && rec.sessionId !== slot.backendSessionId)) return;
+    const update = asRecord(rec.update);
+    if (!update) return;
+    for (const emission of slot.projector.projectSessionUpdate(update)) {
+      emit(emission);
+    }
+  });
+
+  const stopReqs = acp.onRequest(async (_id, method, reqParams) => {
+    if (method === 'session/request_permission') {
+      const rec = asRecord(reqParams);
+      const toolCall = asRecord(rec?.toolCall);
+      const toolCallId = typeof toolCall?.toolCallId === 'string' ? toolCall.toolCallId : undefined;
+      const toolName =
+        typeof toolCall?.title === 'string' && toolCall.title.length > 0
+          ? toolCall.title
+          : typeof toolCall?.name === 'string' && toolCall.name.length > 0
+            ? toolCall.name
+            : 'tool';
+      const options = normalizePermissionOptions(rec?.options);
+      const decision = asRecord(
+        await io.callHost(sessionScope, 'permission/request', {
+          action: toolName,
+          detail: JSON.stringify(toolCall?.rawInput ?? {}).slice(0, 500),
+          ...(toolCallId !== undefined ? { toolCallId } : {}),
+          context: { kind: 'tool', toolName },
+          options,
+          ...(runId !== undefined ? { runId } : {}),
+        }),
+      );
+      if (decision?.cancelled === true || typeof decision?.optionId !== 'string') {
+        return { outcome: { outcome: 'cancelled' } };
+      }
+      return { outcome: { outcome: 'selected', optionId: decision.optionId } };
+    }
+    throw new Error(`Unsupported ACP client request: ${method}`);
+  });
+
+  try {
+    const promptRes = asRecord(
+      await acp.request('session/prompt', {
+        sessionId: slot.backendSessionId,
+        prompt: built.blocks,
+      }),
+    );
+    for (const flushed of slot.projector.flushActiveMessage()) {
+      emit(flushed);
+    }
+    const rawStop = typeof promptRes?.stopReason === 'string' ? promptRes.stopReason : 'end_turn';
+    const aborted = slot.cancelled || rawStop === 'cancelled' || rawStop === 'aborted';
+    if (aborted) {
+      emit({
+        type: 'agent',
+        event: {
+          type: 'session/aborted',
+          sessionId: slot.backendSessionId,
+          ...(runId !== undefined ? { runId } : {}),
+        },
+      });
+    }
+    io.write(
+      okFrame(frame, {
+        status: aborted ? 'aborted' : 'ok',
+        stopReason: aborted ? 'aborted' : rawStop,
+      }),
+    );
+  } finally {
+    slot.runningPrompt = false;
+    slot.projector.setRunId(undefined);
+    stopNotes();
+    stopReqs();
+  }
+}
+
+export async function configureAntigravitySession(input: {
+  frame: Extract<Frame, { kind: 'request' }>;
+  io: HostIO;
+  slot: SessionSlot | undefined;
+  ensureAcp: (appDataDir: 'antigravity' | 'antigravity-cli') => Promise<AcpPort>;
+}): Promise<void> {
+  const { frame, io, slot, ensureAcp } = input;
+  if (!slot) {
+    io.write(okFrame(frame, DEFAULT_ANTIGRAVITY_OPTIONS));
+    return;
+  }
+  if (frame.method === 'session/options') {
+    io.write(okFrame(frame, slot.projector.getOptions()));
+    return;
+  }
+
+  const acp = await ensureAcp(slot.appDataDir);
+  const params = asRecord(frame.params);
+  let updatedOptions: SessionBackendOptions = slot.projector.getOptions();
+
+  if (frame.method === 'session/model') {
+    const rawModelId = typeof params?.modelId === 'string' ? params.modelId.trim() : '';
+    if (!rawModelId) {
+      io.write(errFrame(frame, 'invalid-request', 'modelId is required'));
+      return;
+    }
+    const { baseModelId, effortId } = splitCombinedModelAndEffort(rawModelId);
+    const res = await acp.request('session/set_config_option', {
+      sessionId: slot.backendSessionId,
+      configId: 'model',
+      value: baseModelId,
+    });
+    updatedOptions = slot.projector.updateOptionsFromPayload(res);
+    if (effortId && updatedOptions.efforts.includes(effortId)) {
+      const effortRes = await acp.request('session/set_config_option', {
+        sessionId: slot.backendSessionId,
+        configId: 'thought_level',
+        value: effortId,
+      });
+      updatedOptions = slot.projector.updateOptionsFromPayload(effortRes);
+    }
+  } else if (frame.method === 'session/effort') {
+    const effortId = typeof params?.effortId === 'string' ? params.effortId.trim() : '';
+    if (!effortId) {
+      io.write(errFrame(frame, 'invalid-request', 'effortId is required'));
+      return;
+    }
+    const res = await acp.request('session/set_config_option', {
+      sessionId: slot.backendSessionId,
+      configId: 'thought_level',
+      value: effortId,
+    });
+    updatedOptions = slot.projector.updateOptionsFromPayload(res);
+  } else if (frame.method === 'session/mode') {
+    const modeId = typeof params?.modeId === 'string' ? params.modeId.trim() : '';
+    if (!modeId) {
+      io.write(errFrame(frame, 'invalid-request', 'modeId is required'));
+      return;
+    }
+    await acp.request('session/set_mode', {
+      sessionId: slot.backendSessionId,
+      modeId,
+    });
+    updatedOptions = slot.projector.updateOptionsFromPayload({
+      modes: { currentModeId: modeId, availableModes: updatedOptions.modes },
+    });
+  }
+
+  io.write(okFrame(frame, updatedOptions));
+}
