@@ -3,7 +3,13 @@ import {
   DEFAULT_ANTIGRAVITY_MODES,
   DEFAULT_ANTIGRAVITY_OPTIONS,
 } from './capabilities.js';
-import type { BackendModeOption, BackendModelOption, SessionBackendOptions } from './types.js';
+import {
+  AGENT_ID,
+  type BackendModelOption,
+  type BackendOption,
+  type BackendSlashCommand,
+  type SessionBackendOptions,
+} from './types.js';
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -32,6 +38,31 @@ export function splitCombinedModelAndEffort(rawModelId: string): {
   return { baseModelId: rawModelId };
 }
 
+export function parseAcpCommands(rawCommands: unknown): BackendSlashCommand[] {
+  if (!Array.isArray(rawCommands)) return [];
+  const commands: BackendSlashCommand[] = [];
+  for (const rawCmd of rawCommands) {
+    const cmd = asRecord(rawCmd);
+    if (!cmd || typeof cmd.name !== 'string' || cmd.name.trim().length === 0) continue;
+    const name = cmd.name.trim();
+    const description =
+      typeof cmd.description === 'string' && cmd.description.trim().length > 0
+        ? cmd.description.trim()
+        : undefined;
+    const inputRec = asRecord(cmd.input);
+    const inputHint =
+      typeof inputRec?.hint === 'string' && inputRec.hint.trim().length > 0
+        ? inputRec.hint.trim()
+        : undefined;
+    commands.push({
+      name,
+      ...(description !== undefined ? { description } : {}),
+      ...(inputHint !== undefined ? { inputHint } : {}),
+    });
+  }
+  return commands;
+}
+
 export function parseAcpOptions(
   payload: unknown,
   fallback: SessionBackendOptions = DEFAULT_ANTIGRAVITY_OPTIONS,
@@ -48,11 +79,10 @@ export function parseAcpOptions(
   let currentModelId: string | undefined;
   let currentEffortId: string | undefined;
   let currentModeId: string | undefined;
-  let efforts: string[] = [];
+  const efforts: string[] = [];
   const models: BackendModelOption[] = [];
-  const modes: BackendModeOption[] = [];
+  const modes: BackendOption[] = [];
 
-  // Track which base models support low/medium/high efforts according to availableModels
   const modelEffortsMap = new Map<string, string[]>();
   for (const item of availableModels) {
     const entry = asRecord(item);
@@ -94,21 +124,28 @@ export function parseAcpOptions(
         const opt = asRecord(rawOpt);
         const id = typeof opt?.value === 'string' ? opt.value : undefined;
         if (!id) continue;
-        const name = typeof opt?.name === 'string' ? opt.name : id;
+        const label =
+          typeof opt?.name === 'string' && opt.name.trim().length > 0
+            ? opt.name.trim()
+            : typeof opt?.label === 'string' && opt.label.trim().length > 0
+              ? opt.label.trim()
+              : id;
         const description = typeof opt?.description === 'string' ? opt.description : undefined;
+        const fallbackModel = fallback.models.find((m) => m.id === id);
         const knownEfforts =
           modelEffortsMap.get(id) ??
-          (id === 'gpt-oss-120b-medium' ? undefined : efforts.length > 0 ? efforts : [...DEFAULT_ANTIGRAVITY_EFFORTS]);
+          (id === 'gpt-oss-120b-medium'
+            ? undefined
+            : efforts.length > 0
+              ? efforts
+              : fallbackModel?.efforts
+                ? [...fallbackModel.efforts]
+                : [...DEFAULT_ANTIGRAVITY_EFFORTS]);
         models.push({
           id,
-          name,
+          label,
           ...(description !== undefined ? { description } : {}),
-          ...(knownEfforts && knownEfforts.length > 0
-            ? {
-                efforts: knownEfforts,
-                ...(currentEffortId !== undefined ? { currentEffortId } : {}),
-              }
-            : {}),
+          ...(knownEfforts && knownEfforts.length > 0 ? { efforts: knownEfforts } : {}),
         });
       }
     } else if (cfg.id === 'mode' || cfg.category === 'mode') {
@@ -117,18 +154,22 @@ export function parseAcpOptions(
         const opt = asRecord(rawOpt);
         const id = typeof opt?.value === 'string' ? opt.value : undefined;
         if (!id) continue;
-        const name = typeof opt?.name === 'string' ? opt.name : id;
+        const label =
+          typeof opt?.name === 'string' && opt.name.trim().length > 0
+            ? opt.name.trim()
+            : typeof opt?.label === 'string' && opt.label.trim().length > 0
+              ? opt.label.trim()
+              : id;
         const description = typeof opt?.description === 'string' ? opt.description : undefined;
         modes.push({
           id,
-          name,
+          label,
           ...(description !== undefined ? { description } : {}),
         });
       }
     }
   }
 
-  // Fallback to top-level `models` block if `configOptions` did not include a model selector
   if (models.length === 0 && availableModels.length > 0) {
     const seen = new Set<string>();
     for (const item of availableModels) {
@@ -139,12 +180,12 @@ export function parseAcpOptions(
       if (seen.has(baseModelId)) continue;
       seen.add(baseModelId);
       const rawName = typeof entry?.name === 'string' ? entry.name : baseModelId;
-      const cleanName = rawName.replace(/\s*\((Low|Medium|High)\)\s*$/i, '');
+      const label = rawName.replace(/\s*\((Low|Medium|High)\)\s*$/i, '').trim() || baseModelId;
       const description = typeof entry?.description === 'string' ? entry.description : undefined;
       const knownEfforts = modelEffortsMap.get(baseModelId);
       models.push({
         id: baseModelId,
-        name: cleanName,
+        label,
         ...(description !== undefined ? { description } : {}),
         ...(knownEfforts && knownEfforts.length > 0 ? { efforts: knownEfforts } : {}),
       });
@@ -159,18 +200,22 @@ export function parseAcpOptions(
     }
   }
 
-  // Fallback to top-level `modes` block if `configOptions` did not include a mode selector
   const modesBlock = asRecord(rec.modes);
   if (modes.length === 0 && Array.isArray(modesBlock?.availableModes)) {
     for (const rawMode of modesBlock.availableModes) {
       const m = asRecord(rawMode);
       const id = typeof m?.id === 'string' ? m.id : undefined;
       if (!id) continue;
-      const name = typeof m?.name === 'string' ? m.name : id;
+      const label =
+        typeof m?.name === 'string' && m.name.trim().length > 0
+          ? m.name.trim()
+          : typeof m?.label === 'string' && m.label.trim().length > 0
+            ? m.label.trim()
+            : id;
       const description = typeof m?.description === 'string' ? m.description : undefined;
       modes.push({
         id,
-        name,
+        label,
         ...(description !== undefined ? { description } : {}),
       });
     }
@@ -180,25 +225,32 @@ export function parseAcpOptions(
   }
 
   const finalModels = models.length > 0 ? models : fallback.models;
-  const finalModes = modes.length > 0 ? modes : DEFAULT_ANTIGRAVITY_MODES;
+  const finalModes = modes.length > 0 ? modes : fallback.modes.length > 0 ? fallback.modes : DEFAULT_ANTIGRAVITY_MODES;
   const resolvedModelId = currentModelId ?? fallback.currentModelId;
   const activeModel = finalModels.find((m) => m.id === resolvedModelId);
-  const finalEfforts =
-    efforts.length > 0
-      ? efforts
-      : activeModel?.efforts
-        ? [...activeModel.efforts]
-        : [];
+  const activeModelEfforts = activeModel?.efforts ?? [];
   const resolvedEffortId =
-    finalEfforts.length > 0 ? (currentEffortId ?? fallback.currentEffortId ?? finalEfforts[0]) : undefined;
+    activeModelEfforts.length > 0
+      ? currentEffortId && activeModelEfforts.includes(currentEffortId)
+        ? currentEffortId
+        : fallback.currentEffortId && activeModelEfforts.includes(fallback.currentEffortId)
+          ? fallback.currentEffortId
+          : activeModelEfforts[0]
+      : undefined;
   const resolvedModeId = currentModeId ?? fallback.currentModeId;
+  const commands = Array.isArray(rec.availableCommands)
+    ? parseAcpCommands(rec.availableCommands)
+    : fallback.commands;
 
   return {
+    agentId: AGENT_ID,
     models: finalModels,
     ...(resolvedModelId !== undefined ? { currentModelId: resolvedModelId } : {}),
-    efforts: finalEfforts,
     ...(resolvedEffortId !== undefined ? { currentEffortId: resolvedEffortId } : {}),
     modes: finalModes,
     ...(resolvedModeId !== undefined ? { currentModeId: resolvedModeId } : {}),
+    modeConfirmed: true,
+    autoApprove: resolvedModeId === 'auto',
+    commands,
   };
 }

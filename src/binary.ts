@@ -1,4 +1,4 @@
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
@@ -69,21 +69,55 @@ export function isUnusableAntigravityProbe(input: { stderr: string }): boolean {
 }
 
 /**
- * Antigravity stores IDE / Gemini.app conversations in `~/.gemini/antigravity/conversations/<id>.db`,
- * whereas standalone `agy` CLI defaults to `~/.gemini/antigravity-cli/conversations/<id>.db`.
- * Defaulting to `antigravity` shares sessions with Gemini.app / Antigravity IDE, while falling back to
- * `antigravity-cli` when loading a session that exists only in the CLI store.
+ * Interactive `agy --conversation <id>` always operates against `~/.gemini/antigravity-cli`
+ * (while importing non-empty trajectories from `~/.gemini/antigravity` on demand).
+ *
+ * Creating new sessions in `antigravity-cli` guarantees that brand-new 0-turn sessions
+ * can be opened immediately in the embedded `agy --conversation <id>` terminal.
+ * Existing sessions are resolved from `antigravity-cli` first, then `antigravity`.
  */
 export function resolveAntigravityAppDataDir(
   sessionId: string | undefined,
   deps: { homeDir?: string; fileExists?: (path: string) => boolean } = {},
 ): 'antigravity' | 'antigravity-cli' {
-  if (!sessionId) return 'antigravity';
+  if (!sessionId) return 'antigravity-cli';
   const home = deps.homeDir ?? process.env.HOME ?? homedir();
   const exists = deps.fileExists ?? defaultFileExists;
-  const mainDb = join(home, '.gemini', 'antigravity', 'conversations', `${sessionId}.db`);
-  if (exists(mainDb)) return 'antigravity';
   const cliDb = join(home, '.gemini', 'antigravity-cli', 'conversations', `${sessionId}.db`);
   if (exists(cliDb)) return 'antigravity-cli';
-  return 'antigravity';
+  const mainDb = join(home, '.gemini', 'antigravity', 'conversations', `${sessionId}.db`);
+  if (exists(mainDb)) return 'antigravity';
+  return 'antigravity-cli';
+}
+
+const UUID_DB_PATTERN = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.db$/i;
+
+/**
+ * Lists local conversation `.db` files in `~/.gemini/antigravity-cli/conversations`.
+ * `agy acp` `session/list` omits 0-turn conversations (`step_count = 0`); supplementing
+ * them prevents Host catalog sync from deleting newly created empty sessions.
+ */
+export function listCliConversationDbFiles(
+  homeDir: string = process.env.HOME ?? homedir(),
+): { backendSessionId: string; lastChangeUnixMs: number }[] {
+  const dir = join(homeDir, '.gemini', 'antigravity-cli', 'conversations');
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const results: { backendSessionId: string; lastChangeUnixMs: number }[] = [];
+  for (const name of names) {
+    const match = UUID_DB_PATTERN.exec(name);
+    const id = match?.[1];
+    if (!id) continue;
+    try {
+      const stat = statSync(join(dir, name));
+      results.push({ backendSessionId: id, lastChangeUnixMs: Math.round(stat.mtimeMs) });
+    } catch {
+      // Ignore transient/deleted db files.
+    }
+  }
+  return results;
 }

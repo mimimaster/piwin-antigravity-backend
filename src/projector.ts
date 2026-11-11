@@ -1,11 +1,20 @@
-import { parseAcpOptions } from './options.js';
-import type {
-  PermissionOption,
-  SessionBackendOptions,
-  SessionEmission,
-  SlashCommandDescriptor,
-  ToolPresentation,
-} from './types.js';
+import { parseAcpCommands, parseAcpOptions } from './options.js';
+import {
+  buildPresentationFromToolState,
+  extractAcpToolOutput,
+  inferToolKindFromName,
+  pickNonEmptyString,
+  type ToolCallState,
+} from './protocol-mapping.js';
+import type { AgentPluginEmission, SessionBackendOptions } from './types.js';
+
+export {
+  classifyAntigravityFailure,
+  inferToolKindFromName,
+  mapAcpStopReason,
+  normalizePermissionOptions,
+  parseAntigravityPermissionPrompt,
+} from './protocol-mapping.js';
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -13,113 +22,13 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function pickString(rec: Record<string, unknown> | undefined, keys: readonly string[]): string | undefined {
-  if (!rec) return undefined;
-  for (const key of keys) {
-    const val = rec[key];
-    if (typeof val === 'string' && val.trim().length > 0) {
-      return val.trim();
-    }
-  }
-  return undefined;
-}
-
-export function extractToolPresentation(update: Record<string, unknown>): ToolPresentation | undefined {
-  const kind = typeof update.kind === 'string' ? update.kind : undefined;
-  const label =
-    typeof update.title === 'string' && update.title.trim().length > 0
-      ? update.title.trim()
-      : typeof update.name === 'string' && update.name.trim().length > 0
-        ? update.name.trim()
-        : undefined;
-
-  const rawInput = asRecord(update.rawInput);
-  const command = pickString(rawInput, ['CommandLine', 'command', 'cmd']);
-
-  let path = pickString(rawInput, [
-    'Path',
-    'TargetFile',
-    'SearchDirectory',
-    'DirectoryPath',
-    'Cwd',
-    'path',
-    'file_path',
-    'filePath',
-    'target_file',
-    'Query',
-    'Pattern',
-    'Url',
-  ]);
-  if (!path && Array.isArray(update.locations)) {
-    for (const loc of update.locations) {
-      const locRec = asRecord(loc);
-      if (typeof locRec?.path === 'string' && locRec.path.trim().length > 0) {
-        path = locRec.path.trim();
-        break;
-      }
-    }
-  }
-
-  let outputPreview: string | undefined;
-  const rawOutput = asRecord(update.rawOutput);
-  if (typeof rawOutput?.output === 'string' && rawOutput.output.trim().length > 0) {
-    outputPreview = rawOutput.output.slice(0, 4000);
-  } else if (Array.isArray(update.content)) {
-    const parts: string[] = [];
-    for (const item of update.content) {
-      const block = asRecord(item);
-      if (!block) continue;
-      if (block.type === 'content') {
-        const inner = asRecord(block.content);
-        if (inner?.type === 'text' && typeof inner.text === 'string') {
-          parts.push(inner.text);
-        }
-      } else if (block.type === 'text' && typeof block.text === 'string') {
-        parts.push(block.text);
-      } else if (block.type === 'diff' && typeof block.path === 'string') {
-        if (!path) path = block.path;
-      }
-    }
-    const joined = parts.join('\n').trim();
-    if (joined.length > 0) outputPreview = joined.slice(0, 4000);
-  }
-
-  if (!kind && !label && !command && !path && !outputPreview) return undefined;
-  return {
-    ...(kind !== undefined ? { kind } : {}),
-    ...(label !== undefined ? { label } : {}),
-    ...(command !== undefined ? { command } : {}),
-    ...(path !== undefined ? { path } : {}),
-    ...(outputPreview !== undefined ? { outputPreview } : {}),
-  };
-}
-
-export function normalizePermissionOptions(rawOptions: unknown): PermissionOption[] {
-  if (!Array.isArray(rawOptions)) return [];
-  const options: PermissionOption[] = [];
-  for (const item of rawOptions) {
-    const rec = asRecord(item);
-    if (!rec || typeof rec.optionId !== 'string') continue;
-    const label = typeof rec.name === 'string' ? rec.name : typeof rec.label === 'string' ? rec.label : rec.optionId;
-    const rawKind = typeof rec.kind === 'string' ? rec.kind : '';
-    const kind: PermissionOption['kind'] =
-      rawKind === 'allow_always' || rawKind === 'allow_once' || rawKind === 'reject_always' || rawKind === 'reject_once'
-        ? rawKind
-        : rawKind.includes('allow')
-          ? 'allow_once'
-          : 'reject_once';
-    options.push({ optionId: rec.optionId, label, kind });
-  }
-  return options;
-}
-
 export class AcpSessionProjector {
   private nextSeq = 1;
   private activeRole: 'user' | 'assistant' | undefined;
   private activeMessageId: string | undefined;
+  private lastAssistantMessageId: string | undefined;
   private activeRunId: string | undefined;
-  private readonly startedTools = new Set<string>();
-  private readonly endedTools = new Set<string>();
+  private readonly tools = new Map<string, ToolCallState>();
   private currentOptions: SessionBackendOptions;
 
   constructor(initialOptions: SessionBackendOptions) {
@@ -128,6 +37,9 @@ export class AcpSessionProjector {
 
   setRunId(runId: string | undefined): void {
     this.activeRunId = runId;
+    if (runId !== undefined) {
+      this.lastAssistantMessageId = undefined;
+    }
   }
 
   getOptions(): SessionBackendOptions {
@@ -139,10 +51,11 @@ export class AcpSessionProjector {
     return this.currentOptions;
   }
 
-  flushActiveMessage(): SessionEmission[] {
+  flushActiveMessage(): AgentPluginEmission[] {
     if (!this.activeMessageId) return [];
     const messageId = this.activeMessageId;
-    const runId = this.activeRunId;
+    const role = this.activeRole;
+    const runId = role === 'assistant' ? this.activeRunId : undefined;
     this.activeMessageId = undefined;
     this.activeRole = undefined;
     return [
@@ -157,11 +70,42 @@ export class AcpSessionProjector {
     ];
   }
 
-  projectSessionUpdate(update: Record<string, unknown>): SessionEmission[] {
+  finishTurn(aborted = false): AgentPluginEmission[] {
+    const emissions: AgentPluginEmission[] = [];
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    for (const state of this.tools.values()) {
+      if (state.ended) continue;
+      state.ended = true;
+      const durationMs = Math.max(0, nowMs - state.startedMs);
+      emissions.push({
+        type: 'agent',
+        event: {
+          type: 'tool/end',
+          toolCallId: state.toolCallId,
+          isError: aborted,
+          ...(state.responseMessageId !== undefined ? { responseMessageId: state.responseMessageId } : {}),
+          ...(this.activeRunId !== undefined ? { runId: this.activeRunId } : {}),
+          presentation: buildPresentationFromToolState(state, {
+            endedAt: nowIso,
+            durationMs,
+            isError: aborted,
+          }),
+        },
+      });
+    }
+    emissions.push(...this.flushActiveMessage());
+    return emissions;
+  }
+
+  projectSessionUpdate(update: Record<string, unknown>): AgentPluginEmission[] {
     const kind = update.sessionUpdate;
     if (typeof kind !== 'string') return [];
 
     if (kind === 'user_message_chunk') {
+      // During live prompts (activeRunId !== undefined), Host already owns the user row;
+      // only project user_message_chunk during session/load replay.
+      if (this.activeRunId !== undefined) return [];
       return this.projectTextChunk('user', update);
     }
     if (kind === 'agent_message_chunk') {
@@ -174,12 +118,19 @@ export class AcpSessionProjector {
       return this.projectToolUpdate(kind, update);
     }
     if (kind === 'available_commands_update') {
-      return this.projectCommandsUpdate(update);
+      const commands = parseAcpCommands(update.availableCommands);
+      this.currentOptions = { ...this.currentOptions, commands };
+      return [{ type: 'options', options: this.currentOptions }];
     }
     if (kind === 'current_mode_update') {
       const modeId = typeof update.currentModeId === 'string' ? update.currentModeId : undefined;
       if (!modeId) return [];
-      this.currentOptions = { ...this.currentOptions, currentModeId: modeId };
+      this.currentOptions = {
+        ...this.currentOptions,
+        currentModeId: modeId,
+        modeConfirmed: true,
+        autoApprove: modeId === 'auto',
+      };
       return [{ type: 'options', options: this.currentOptions }];
     }
     if (kind === 'config_option_update') {
@@ -187,46 +138,14 @@ export class AcpSessionProjector {
       return [{ type: 'options', options: this.currentOptions }];
     }
     if (kind === 'session_info_update') {
-      const title = typeof update.title === 'string' ? update.title : undefined;
-      const updatedAt = typeof update.updatedAt === 'string' ? update.updatedAt : undefined;
-      if (title === undefined && updatedAt === undefined) return [];
-      return [
-        {
-          type: 'session_info',
-          ...(title !== undefined ? { title } : {}),
-          ...(updatedAt !== undefined ? { updatedAt } : {}),
-        },
-      ];
-    }
-    if (kind === 'plan' && Array.isArray(update.entries)) {
-      const entries: { content: string; status: 'pending' | 'in_progress' | 'completed'; priority?: 'high' | 'medium' | 'low' }[] = [];
-      for (const item of update.entries) {
-        const rec = asRecord(item);
-        if (!rec || typeof rec.content !== 'string') continue;
-        const status =
-          rec.status === 'in_progress' || rec.status === 'completed' ? rec.status : 'pending';
-        const priority =
-          rec.priority === 'high' || rec.priority === 'medium' || rec.priority === 'low'
-            ? rec.priority
-            : undefined;
-        entries.push({
-          content: rec.content,
-          status,
-          ...(priority !== undefined ? { priority } : {}),
-        });
-      }
-      return [
-        {
-          type: 'plan',
-          entries,
-          ...(this.activeRunId !== undefined ? { runId: this.activeRunId } : {}),
-        },
-      ];
+      const title = typeof update.title === 'string' && update.title.trim().length > 0 ? update.title.trim() : undefined;
+      if (title === undefined) return [];
+      return [{ type: 'title', title }];
     }
     return [];
   }
 
-  private ensureMessage(role: 'user' | 'assistant'): { emissions: SessionEmission[]; messageId: string } {
+  private ensureMessage(role: 'user' | 'assistant'): { emissions: AgentPluginEmission[]; messageId: string } {
     if (this.activeRole === role && this.activeMessageId) {
       return { emissions: [], messageId: this.activeMessageId };
     }
@@ -235,6 +154,11 @@ export class AcpSessionProjector {
     this.nextSeq += 1;
     this.activeRole = role;
     this.activeMessageId = messageId;
+    if (role === 'assistant') {
+      this.lastAssistantMessageId = messageId;
+    } else {
+      this.lastAssistantMessageId = undefined;
+    }
     const runId = role === 'assistant' ? this.activeRunId : undefined;
     flushed.push({
       type: 'agent',
@@ -248,7 +172,7 @@ export class AcpSessionProjector {
     return { emissions: flushed, messageId };
   }
 
-  private projectTextChunk(role: 'user' | 'assistant', update: Record<string, unknown>): SessionEmission[] {
+  private projectTextChunk(role: 'user' | 'assistant', update: Record<string, unknown>): AgentPluginEmission[] {
     const content = asRecord(update.content);
     const text = typeof content?.text === 'string' ? content.text : undefined;
     if (!text || text.length === 0) return [];
@@ -266,16 +190,19 @@ export class AcpSessionProjector {
     return emissions;
   }
 
-  private projectThoughtChunk(update: Record<string, unknown>): SessionEmission[] {
+  private projectThoughtChunk(update: Record<string, unknown>): AgentPluginEmission[] {
     const content = asRecord(update.content);
     const text = typeof content?.text === 'string' ? content.text : undefined;
     if (!text || text.length === 0) return [];
     const { emissions, messageId } = this.ensureMessage('assistant');
     emissions.push({
-      type: 'thinking',
-      messageId,
-      delta: text,
-      ...(this.activeRunId !== undefined ? { runId: this.activeRunId } : {}),
+      type: 'agent',
+      event: {
+        type: 'message/thinking_delta',
+        messageId,
+        delta: text,
+        ...(this.activeRunId !== undefined ? { runId: this.activeRunId } : {}),
+      },
     });
     return emissions;
   }
@@ -283,7 +210,7 @@ export class AcpSessionProjector {
   private projectToolUpdate(
     kind: 'tool_call' | 'tool_call_update',
     update: Record<string, unknown>,
-  ): SessionEmission[] {
+  ): AgentPluginEmission[] {
     const toolCallId = typeof update.toolCallId === 'string' ? update.toolCallId : undefined;
     if (!toolCallId) return [];
     const rawStatus = typeof update.status === 'string' ? update.status : undefined;
@@ -294,88 +221,114 @@ export class AcpSessionProjector {
           ? 'in_progress'
           : 'completed';
 
-    const toolName =
-      typeof update.name === 'string' && update.name.length > 0
-        ? update.name
-        : typeof update.title === 'string' && update.title.length > 0
-          ? update.title
-          : 'tool';
-    const presentation = extractToolPresentation(update);
-    const runId = this.activeRunId;
-    const emissions: SessionEmission[] = [];
-
-    if (!this.startedTools.has(toolCallId)) {
-      // Close any streaming user message before starting tool calls
-      if (this.activeRole === 'user') {
-        emissions.push(...this.flushActiveMessage());
+    const rawInput = asRecord(update.rawInput);
+    const command = pickNonEmptyString(rawInput, ['CommandLine', 'command', 'cmd']);
+    let pathVal = pickNonEmptyString(rawInput, [
+      'Path',
+      'TargetFile',
+      'SearchDirectory',
+      'DirectoryPath',
+      'Cwd',
+      'path',
+      'file_path',
+      'filePath',
+      'target_file',
+    ]);
+    if (!pathVal && Array.isArray(update.locations)) {
+      for (const loc of update.locations) {
+        const locRec = asRecord(loc);
+        if (typeof locRec?.path === 'string' && locRec.path.trim().length > 0) {
+          pathVal = locRec.path.trim();
+          break;
+        }
       }
-      this.startedTools.add(toolCallId);
+    }
+    const extracted = extractAcpToolOutput(update);
+    if (!pathVal && extracted.diffPath) pathVal = extracted.diffPath;
+
+    const runId = this.activeRunId;
+    const emissions: AgentPluginEmission[] = [];
+    let state = this.tools.get(toolCallId);
+
+    if (!state) {
+      emissions.push(...this.flushActiveMessage());
+      const toolName = pickNonEmptyString(update, ['name', 'title']) ?? 'tool';
+      const title = pickNonEmptyString(update, ['title', 'name']) ?? toolName;
+      const acpKind = typeof update.kind === 'string' ? update.kind : undefined;
+      const nowMs = Date.now();
+      state = {
+        toolCallId,
+        toolName,
+        ...(this.lastAssistantMessageId !== undefined ? { responseMessageId: this.lastAssistantMessageId } : {}),
+        kind: inferToolKindFromName(toolName, acpKind),
+        title,
+        ...(command !== undefined ? { command } : {}),
+        ...(pathVal !== undefined ? { targetPaths: [pathVal] } : {}),
+        ...(extracted.diffPath !== undefined ? { changedPaths: [extracted.diffPath] } : {}),
+        ...(extracted.text !== undefined ? { outputText: extracted.text } : {}),
+        ...(extracted.truncated ? { outputTruncated: true } : {}),
+        ...(extracted.exitCode !== undefined ? { exitCode: extracted.exitCode } : {}),
+        startedAt: new Date(nowMs).toISOString(),
+        startedMs: nowMs,
+        ended: false,
+      };
+      this.tools.set(toolCallId, state);
       emissions.push({
         type: 'agent',
         event: {
           type: 'tool/start',
           toolCallId,
-          toolName,
+          toolName: state.toolName,
+          ...(state.responseMessageId !== undefined ? { responseMessageId: state.responseMessageId } : {}),
           ...(runId !== undefined ? { runId } : {}),
+          presentation: buildPresentationFromToolState(state),
         },
       });
-      emissions.push({
-        type: 'tool',
-        toolCallId,
-        phase: 'start',
-        status: status === 'completed' || status === 'failed' ? 'in_progress' : status,
-        ...(presentation !== undefined ? { presentation } : {}),
-        ...(runId !== undefined ? { runId } : {}),
-      });
-    } else if (status === 'pending' || status === 'in_progress') {
-      emissions.push({
-        type: 'tool',
-        toolCallId,
-        phase: 'update',
-        status,
-        ...(presentation !== undefined ? { presentation } : {}),
-        ...(runId !== undefined ? { runId } : {}),
-      });
+    } else {
+      const updatedTitle = pickNonEmptyString(update, ['title']);
+      if (updatedTitle !== undefined) state.title = updatedTitle;
+      if (command !== undefined) state.command = command;
+      if (pathVal !== undefined && (!state.targetPaths || state.targetPaths.length === 0)) {
+        state.targetPaths = [pathVal];
+      }
+      if (extracted.diffPath !== undefined) state.changedPaths = [extracted.diffPath];
+      if (extracted.text !== undefined) state.outputText = extracted.text;
+      if (extracted.truncated) state.outputTruncated = true;
+      if (extracted.exitCode !== undefined) state.exitCode = extracted.exitCode;
+
+      if ((status === 'pending' || status === 'in_progress') && !state.ended) {
+        emissions.push({
+          type: 'agent',
+          event: {
+            type: 'tool/update',
+            toolCallId,
+            delta: extracted.text ?? '',
+            ...(state.responseMessageId !== undefined ? { responseMessageId: state.responseMessageId } : {}),
+            ...(runId !== undefined ? { runId } : {}),
+            presentation: buildPresentationFromToolState(state),
+          },
+        });
+      }
     }
 
-    if ((status === 'completed' || status === 'failed') && !this.endedTools.has(toolCallId)) {
-      this.endedTools.add(toolCallId);
-      emissions.push({
-        type: 'tool',
-        toolCallId,
-        phase: 'end',
-        status,
-        ...(presentation !== undefined ? { presentation } : {}),
-        ...(runId !== undefined ? { runId } : {}),
-      });
+    if ((status === 'completed' || status === 'failed') && !state.ended) {
+      state.ended = true;
+      const nowMs = Date.now();
+      const endedAt = new Date(nowMs).toISOString();
+      const durationMs = Math.max(0, nowMs - state.startedMs);
+      const isError = status === 'failed';
       emissions.push({
         type: 'agent',
         event: {
           type: 'tool/end',
           toolCallId,
-          isError: status === 'failed',
+          isError,
+          ...(state.responseMessageId !== undefined ? { responseMessageId: state.responseMessageId } : {}),
           ...(runId !== undefined ? { runId } : {}),
+          presentation: buildPresentationFromToolState(state, { endedAt, durationMs, isError }),
         },
       });
     }
     return emissions;
-  }
-
-  private projectCommandsUpdate(update: Record<string, unknown>): SessionEmission[] {
-    if (!Array.isArray(update.availableCommands)) return [];
-    const commands: SlashCommandDescriptor[] = [];
-    for (const rawCmd of update.availableCommands) {
-      const cmd = asRecord(rawCmd);
-      if (!cmd || typeof cmd.name !== 'string') continue;
-      const description = typeof cmd.description === 'string' ? cmd.description : '';
-      const inputRec = asRecord(cmd.input);
-      const inputHint = typeof inputRec?.hint === 'string' ? inputRec.hint : undefined;
-      commands.push({
-        name: cmd.name,
-        description,
-        ...(inputHint !== undefined ? { inputHint } : {}),
-      });
-    }
-    return [{ type: 'commands', commands }];
   }
 }

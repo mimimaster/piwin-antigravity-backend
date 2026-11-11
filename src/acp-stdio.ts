@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { AcpPort } from './types.js';
 
-export const ACP_DEFAULT_APP_DATA_DIR = 'antigravity';
+export const ACP_DEFAULT_APP_DATA_DIR = 'antigravity-cli';
 
 const MAX_FRAME_BYTES = 4_000_000;
 const MAX_BUFFER_BYTES = 8_000_000;
@@ -15,14 +15,14 @@ export type AcpStdio = AcpPort & {
 
 export function createAcpStdio(input: {
   binaryPath: string;
-  appDataDir?: string;
+  appDataDir?: 'antigravity' | 'antigravity-cli';
   cwd?: string;
   spawnImpl?: typeof spawn;
   env?: NodeJS.ProcessEnv;
 }): AcpStdio {
   const spawnImpl = input.spawnImpl ?? spawn;
   const appDataDir = input.appDataDir ?? ACP_DEFAULT_APP_DATA_DIR;
-  const args = ['acp', '--app-data-dir', appDataDir];
+  const args = appDataDir === 'antigravity-cli' ? ['acp'] : ['acp', '--app-data-dir', appDataDir];
   const child: ChildProcessWithoutNullStreams = spawnImpl(input.binaryPath, args, {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: input.env ?? process.env,

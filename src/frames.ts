@@ -1,4 +1,4 @@
-import type { Frame, Scope } from './types.js';
+import type { AgentPluginEmission, Frame, Scope } from './types.js';
 import { PROTOCOL_VERSION } from './types.js';
 
 export function parseFrame(line: string): Frame | undefined {
@@ -47,7 +47,7 @@ export function errFrame(request: Extract<Frame, { kind: 'request' }>, code: str
   };
 }
 
-export function eventFrame(scope: Extract<Scope, { kind: 'session' }>, emission: unknown): Frame {
+export function eventFrame(scope: Extract<Scope, { kind: 'session' }>, emission: AgentPluginEmission): Frame {
   return { protocolVersion: PROTOCOL_VERSION, kind: 'event', scope, emission };
 }
 

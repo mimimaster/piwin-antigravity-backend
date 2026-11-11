@@ -4,7 +4,7 @@ import { createInterface } from "node:readline";
 
 // src/acp-stdio.ts
 import { spawn } from "node:child_process";
-var ACP_DEFAULT_APP_DATA_DIR = "antigravity";
+var ACP_DEFAULT_APP_DATA_DIR = "antigravity-cli";
 var MAX_FRAME_BYTES = 4e6;
 var MAX_BUFFER_BYTES = 8e6;
 var MAX_PENDING = 64;
@@ -12,7 +12,7 @@ var MAX_STDERR_BYTES = 16384;
 function createAcpStdio(input) {
   const spawnImpl = input.spawnImpl ?? spawn;
   const appDataDir = input.appDataDir ?? ACP_DEFAULT_APP_DATA_DIR;
-  const args = ["acp", "--app-data-dir", appDataDir];
+  const args = appDataDir === "antigravity-cli" ? ["acp"] : ["acp", "--app-data-dir", appDataDir];
   const child = spawnImpl(input.binaryPath, args, {
     stdio: ["pipe", "pipe", "pipe"],
     env: input.env ?? process.env,
@@ -128,8 +128,8 @@ function createAcpStdio(input) {
       if (pending.size >= MAX_PENDING) return Promise.reject(new Error("antigravity acp pending map is full"));
       const id = nextId;
       nextId += 1;
-      return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+      return new Promise((resolve2, reject) => {
+        pending.set(id, { resolve: resolve2, reject });
         try {
           write2({ method, id, params });
         } catch (error) {
@@ -170,7 +170,7 @@ function createAcpStdio(input) {
 }
 
 // src/binary.ts
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 function defaultExists(path) {
@@ -226,14 +226,36 @@ function isUnusableAntigravityProbe(input) {
   return text.includes("command not found") || text.includes("no such file or directory");
 }
 function resolveAntigravityAppDataDir(sessionId, deps = {}) {
-  if (!sessionId) return "antigravity";
+  if (!sessionId) return "antigravity-cli";
   const home = deps.homeDir ?? process.env.HOME ?? homedir();
   const exists = deps.fileExists ?? defaultFileExists;
-  const mainDb = join(home, ".gemini", "antigravity", "conversations", `${sessionId}.db`);
-  if (exists(mainDb)) return "antigravity";
   const cliDb = join(home, ".gemini", "antigravity-cli", "conversations", `${sessionId}.db`);
   if (exists(cliDb)) return "antigravity-cli";
-  return "antigravity";
+  const mainDb = join(home, ".gemini", "antigravity", "conversations", `${sessionId}.db`);
+  if (exists(mainDb)) return "antigravity";
+  return "antigravity-cli";
+}
+var UUID_DB_PATTERN = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.db$/i;
+function listCliConversationDbFiles(homeDir = process.env.HOME ?? homedir()) {
+  const dir = join(homeDir, ".gemini", "antigravity-cli", "conversations");
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const results = [];
+  for (const name of names) {
+    const match = UUID_DB_PATTERN.exec(name);
+    const id = match?.[1];
+    if (!id) continue;
+    try {
+      const stat = statSync(join(dir, name));
+      results.push({ backendSessionId: id, lastChangeUnixMs: Math.round(stat.mtimeMs) });
+    } catch {
+    }
+  }
+  return results;
 }
 
 // src/types.ts
@@ -291,74 +313,93 @@ function eventFrame(scope, emission) {
 var DEFAULT_ANTIGRAVITY_EFFORTS = ["low", "medium", "high"];
 var DEFAULT_ANTIGRAVITY_MODELS = [
   {
+    id: "gemini-4-carbon",
+    label: "Gemini 4 Carbon",
+    description: "Antigravity flagship Gemini 4 Carbon model with configurable thought level",
+    efforts: DEFAULT_ANTIGRAVITY_EFFORTS
+  },
+  {
     id: "gemini-4-argon",
-    name: "Gemini 4 Argon",
-    description: "Antigravity flagship Gemini 4 Argon model with configurable thought level",
-    efforts: DEFAULT_ANTIGRAVITY_EFFORTS,
-    currentEffortId: "medium"
+    label: "Gemini 4 Argon",
+    description: "Antigravity Gemini 4 Argon model with configurable thought level",
+    efforts: DEFAULT_ANTIGRAVITY_EFFORTS
   },
   {
     id: "gemini-3.8-flash",
-    name: "Gemini 3.8 Flash",
+    label: "Gemini 3.8 Flash",
     description: "Fast multimodal Gemini 3.8 Flash model with configurable thought level",
-    efforts: DEFAULT_ANTIGRAVITY_EFFORTS,
-    currentEffortId: "medium"
+    efforts: DEFAULT_ANTIGRAVITY_EFFORTS
   },
   {
     id: "claude-opus-5-5",
-    name: "Claude Opus 5.5",
+    label: "Claude Opus 5.5",
     description: "Claude Opus 5.5 on Antigravity",
-    efforts: DEFAULT_ANTIGRAVITY_EFFORTS,
-    currentEffortId: "medium"
+    efforts: DEFAULT_ANTIGRAVITY_EFFORTS
   },
   {
     id: "claude-sonnet-5-5",
-    name: "Claude Sonnet 5.5",
+    label: "Claude Sonnet 5.5",
     description: "Claude Sonnet 5.5 on Antigravity",
-    efforts: DEFAULT_ANTIGRAVITY_EFFORTS,
-    currentEffortId: "medium"
+    efforts: DEFAULT_ANTIGRAVITY_EFFORTS
   },
   {
     id: "gpt-oss-120b-medium",
-    name: "GPT-OSS 120B (Medium)",
+    label: "GPT-OSS 120B (Medium)",
     description: "Open-weight 120B model on Antigravity"
   }
 ];
 var DEFAULT_ANTIGRAVITY_MODES = [
-  { id: "default", name: "Default", description: "Prompts for permission on dangerous operations" },
-  { id: "accept-edits", name: "Accept Edits", description: "Automatically accepts file edit operations" },
-  { id: "auto", name: "Auto", description: "Automatically approves all tool calls (YOLO mode)" },
-  { id: "plan", name: "Plan", description: "Read-only mode; creates plans without modifying files" }
+  { id: "default", label: "Default", description: "Prompts for permission on dangerous operations" },
+  { id: "accept-edits", label: "Accept Edits", description: "Automatically accepts file edit operations" },
+  { id: "auto", label: "Auto", description: "Automatically approves all tool calls (YOLO mode)" },
+  { id: "plan", label: "Plan", description: "Read-only mode; creates plans without modifying files" }
 ];
 var DEFAULT_ANTIGRAVITY_OPTIONS = {
+  agentId: AGENT_ID,
   models: DEFAULT_ANTIGRAVITY_MODELS,
-  currentModelId: "gemini-4-argon",
-  efforts: [...DEFAULT_ANTIGRAVITY_EFFORTS],
+  currentModelId: "gemini-4-carbon",
   currentEffortId: "medium",
   modes: DEFAULT_ANTIGRAVITY_MODES,
-  currentModeId: "default"
+  currentModeId: "default",
+  modeConfirmed: true,
+  autoApprove: false,
+  commands: []
 };
+var SUPPORTED = { supported: true };
+function unsupported(reason) {
+  return { supported: false, reason };
+}
 function antigravityCapabilities() {
-  const yes = { supported: true };
+  const operations = {
+    prompt: SUPPORTED,
+    cancel: SUPPORTED,
+    queue: SUPPORTED,
+    intervene: unsupported("Antigravity ACP does not expose mid-turn interventions"),
+    setModel: SUPPORTED,
+    setEffort: SUPPORTED,
+    setMode: SUPPORTED,
+    slashCommands: SUPPORTED,
+    fileReferences: SUPPORTED,
+    images: SUPPORTED,
+    rename: SUPPORTED,
+    delete: unsupported("Antigravity conversations live in ~/.gemini; archive in piwin to hide"),
+    archive: SUPPORTED,
+    pin: SUPPORTED,
+    export: SUPPORTED,
+    fork: unsupported("Antigravity ACP does not support session branching"),
+    rewind: unsupported("Antigravity owns conversation history natively"),
+    duplicate: unsupported("Antigravity ACP does not support duplicating trajectories"),
+    pause: unsupported("Antigravity runs can be cancelled, not paused"),
+    compact: unsupported("Antigravity manages context compaction automatically"),
+    conversationTree: unsupported("Antigravity sessions have a linear transcript"),
+    coldStorage: unsupported("Antigravity manages its own trajectory database"),
+    hostSubagents: unsupported("Antigravity runs its own subagents internally"),
+    hostTools: unsupported("Antigravity executes its own built-in and MCP tools")
+  };
   return {
-    agentId: "antigravity",
-    session: {
-      create: yes,
-      load: yes,
-      resume: yes,
-      fork: { supported: false, reason: "Antigravity ACP does not expose session/fork" },
-      close: yes
-    },
-    controls: {
-      prompt: yes,
-      cancel: yes,
-      setModel: yes,
-      setEffort: yes,
-      setMode: yes,
-      slashCommands: yes,
-      images: yes
-    },
-    nativeCli: { supported: true }
+    agentId: AGENT_ID,
+    operations,
+    nativeCli: SUPPORTED
   };
 }
 
@@ -377,112 +418,9 @@ function antigravityCliLaunch(backendSessionId) {
 import { readFileSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join2 } from "node:path";
-var MAX_LINE_CHARS = 512 * 1024;
-var MAX_EVENTS = 2e3;
-function asRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
-}
-function readUtf8(path) {
-  try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return void 0;
-  }
-}
-function extractUserRequestText(rawContent) {
-  const match = rawContent.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i);
-  if (match && typeof match[1] === "string") {
-    return match[1].trim();
-  }
-  return rawContent.trim();
-}
-function antigravityTranscriptCandidates(sessionId, homeDir = process.env.HOME ?? homedir2()) {
-  return [
-    join2(homeDir, ".gemini", "antigravity", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl"),
-    join2(homeDir, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl")
-  ];
-}
-function reconstructAntigravityHistory(input) {
-  if (!input.sessionId || input.sessionId.trim().length === 0) {
-    return { ok: false, reason: "native session id required" };
-  }
-  const reader = input.readFile ?? readUtf8;
-  let body;
-  for (const candidate of antigravityTranscriptCandidates(input.sessionId, input.homeDir)) {
-    body = reader(candidate);
-    if (body !== void 0) break;
-  }
-  if (body === void 0) {
-    return { ok: false, reason: "native transcript unavailable" };
-  }
-  const events = [];
-  let lastStatus;
-  let seq = 1;
-  for (const raw of body.split("\n")) {
-    if (events.length >= MAX_EVENTS) break;
-    const line = raw.trim();
-    if (line.length === 0 || line.length > MAX_LINE_CHARS) continue;
-    let record;
-    try {
-      const parsed = JSON.parse(line);
-      const rec = asRecord(parsed);
-      if (!rec) continue;
-      record = rec;
-    } catch {
-      continue;
-    }
-    const stepIndex = typeof record.step_index === "number" ? record.step_index : seq++;
-    if (typeof record.status === "string") {
-      lastStatus = record.status;
-    }
-    if (record.type === "USER_INPUT" && typeof record.content === "string") {
-      const text = extractUserRequestText(record.content);
-      if (text.length === 0) continue;
-      const messageId = `agy-hist-user-${stepIndex}`;
-      events.push(
-        { type: "agent", event: { type: "message/start", messageId, role: "user" } },
-        { type: "agent", event: { type: "message/text_delta", messageId, delta: text } },
-        { type: "agent", event: { type: "message/end", messageId } }
-      );
-      continue;
-    }
-    if (record.type === "PLANNER_RESPONSE") {
-      const thinking = typeof record.thinking === "string" ? record.thinking.trim() : "";
-      const content = typeof record.content === "string" ? record.content.trim() : "";
-      const toolCalls = Array.isArray(record.tool_calls) ? record.tool_calls : [];
-      if (thinking.length === 0 && content.length === 0 && toolCalls.length === 0) continue;
-      const messageId = `agy-hist-assistant-${stepIndex}`;
-      if (thinking.length > 0 || content.length > 0) {
-        events.push({ type: "agent", event: { type: "message/start", messageId, role: "assistant" } });
-        if (thinking.length > 0) {
-          events.push({ type: "thinking", messageId, delta: thinking });
-        }
-        if (content.length > 0) {
-          events.push({ type: "agent", event: { type: "message/text_delta", messageId, delta: content } });
-        }
-        events.push({ type: "agent", event: { type: "message/end", messageId } });
-      }
-      let toolIdx = 0;
-      for (const rawTool of toolCalls) {
-        const tool = asRecord(rawTool);
-        if (!tool || typeof tool.name !== "string") continue;
-        const toolCallId = `agy-hist-tool-${stepIndex}-${toolIdx++}`;
-        events.push(
-          { type: "agent", event: { type: "tool/start", toolCallId, toolName: tool.name } },
-          { type: "agent", event: { type: "tool/end", toolCallId, isError: record.status === "ERROR" } }
-        );
-      }
-    }
-  }
-  if (events.length === 0) {
-    return { ok: false, reason: "native transcript empty" };
-  }
-  const activity = lastStatus === "IN_PROGRESS" || lastStatus === "RUNNING" || lastStatus === "PENDING" ? "running" : lastStatus === "DONE" || lastStatus === "ERROR" || lastStatus === "CANCELLED" ? "idle" : "unknown";
-  return { ok: true, events: events.slice(0, MAX_EVENTS), activity };
-}
 
 // src/options.ts
-function asRecord2(value) {
+function asRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 var EFFORT_SUFFIXES = ["low", "medium", "high"];
@@ -501,21 +439,39 @@ function splitCombinedModelAndEffort(rawModelId) {
   }
   return { baseModelId: rawModelId };
 }
+function parseAcpCommands(rawCommands) {
+  if (!Array.isArray(rawCommands)) return [];
+  const commands = [];
+  for (const rawCmd of rawCommands) {
+    const cmd = asRecord(rawCmd);
+    if (!cmd || typeof cmd.name !== "string" || cmd.name.trim().length === 0) continue;
+    const name = cmd.name.trim();
+    const description = typeof cmd.description === "string" && cmd.description.trim().length > 0 ? cmd.description.trim() : void 0;
+    const inputRec = asRecord(cmd.input);
+    const inputHint = typeof inputRec?.hint === "string" && inputRec.hint.trim().length > 0 ? inputRec.hint.trim() : void 0;
+    commands.push({
+      name,
+      ...description !== void 0 ? { description } : {},
+      ...inputHint !== void 0 ? { inputHint } : {}
+    });
+  }
+  return commands;
+}
 function parseAcpOptions(payload, fallback = DEFAULT_ANTIGRAVITY_OPTIONS) {
-  const rec = asRecord2(payload);
+  const rec = asRecord(payload);
   if (!rec) return fallback;
   const configOptions = Array.isArray(rec.configOptions) ? rec.configOptions : [];
-  const availableModelsBlock = asRecord2(rec.models);
+  const availableModelsBlock = asRecord(rec.models);
   const availableModels = Array.isArray(availableModelsBlock?.availableModels) ? availableModelsBlock.availableModels : [];
   let currentModelId;
   let currentEffortId;
   let currentModeId;
-  let efforts = [];
+  const efforts = [];
   const models = [];
   const modes = [];
   const modelEffortsMap = /* @__PURE__ */ new Map();
   for (const item of availableModels) {
-    const entry = asRecord2(item);
+    const entry = asRecord(item);
     const modelId = typeof entry?.modelId === "string" ? entry.modelId : void 0;
     if (!modelId) continue;
     const { baseModelId, effortId } = splitCombinedModelAndEffort(modelId);
@@ -526,54 +482,52 @@ function parseAcpOptions(payload, fallback = DEFAULT_ANTIGRAVITY_OPTIONS) {
     }
   }
   for (const rawConfig of configOptions) {
-    const cfg = asRecord2(rawConfig);
+    const cfg = asRecord(rawConfig);
     if (!cfg || typeof cfg.id !== "string") continue;
     const opts = Array.isArray(cfg.options) ? cfg.options : [];
     const currentValue = typeof cfg.currentValue === "string" ? cfg.currentValue : void 0;
     if (cfg.id === "thought_level" || cfg.category === "thought_level") {
       if (currentValue) currentEffortId = currentValue;
       for (const rawOpt of opts) {
-        const opt = asRecord2(rawOpt);
+        const opt = asRecord(rawOpt);
         const value = typeof opt?.value === "string" ? opt.value : void 0;
         if (value && !efforts.includes(value)) efforts.push(value);
       }
     }
   }
   for (const rawConfig of configOptions) {
-    const cfg = asRecord2(rawConfig);
+    const cfg = asRecord(rawConfig);
     if (!cfg || typeof cfg.id !== "string") continue;
     const opts = Array.isArray(cfg.options) ? cfg.options : [];
     const currentValue = typeof cfg.currentValue === "string" ? cfg.currentValue : void 0;
     if (cfg.id === "model" || cfg.category === "model") {
       if (currentValue) currentModelId = currentValue;
       for (const rawOpt of opts) {
-        const opt = asRecord2(rawOpt);
+        const opt = asRecord(rawOpt);
         const id = typeof opt?.value === "string" ? opt.value : void 0;
         if (!id) continue;
-        const name = typeof opt?.name === "string" ? opt.name : id;
+        const label = typeof opt?.name === "string" && opt.name.trim().length > 0 ? opt.name.trim() : typeof opt?.label === "string" && opt.label.trim().length > 0 ? opt.label.trim() : id;
         const description = typeof opt?.description === "string" ? opt.description : void 0;
-        const knownEfforts = modelEffortsMap.get(id) ?? (id === "gpt-oss-120b-medium" ? void 0 : efforts.length > 0 ? efforts : [...DEFAULT_ANTIGRAVITY_EFFORTS]);
+        const fallbackModel = fallback.models.find((m) => m.id === id);
+        const knownEfforts = modelEffortsMap.get(id) ?? (id === "gpt-oss-120b-medium" ? void 0 : efforts.length > 0 ? efforts : fallbackModel?.efforts ? [...fallbackModel.efforts] : [...DEFAULT_ANTIGRAVITY_EFFORTS]);
         models.push({
           id,
-          name,
+          label,
           ...description !== void 0 ? { description } : {},
-          ...knownEfforts && knownEfforts.length > 0 ? {
-            efforts: knownEfforts,
-            ...currentEffortId !== void 0 ? { currentEffortId } : {}
-          } : {}
+          ...knownEfforts && knownEfforts.length > 0 ? { efforts: knownEfforts } : {}
         });
       }
     } else if (cfg.id === "mode" || cfg.category === "mode") {
       if (currentValue) currentModeId = currentValue;
       for (const rawOpt of opts) {
-        const opt = asRecord2(rawOpt);
+        const opt = asRecord(rawOpt);
         const id = typeof opt?.value === "string" ? opt.value : void 0;
         if (!id) continue;
-        const name = typeof opt?.name === "string" ? opt.name : id;
+        const label = typeof opt?.name === "string" && opt.name.trim().length > 0 ? opt.name.trim() : typeof opt?.label === "string" && opt.label.trim().length > 0 ? opt.label.trim() : id;
         const description = typeof opt?.description === "string" ? opt.description : void 0;
         modes.push({
           id,
-          name,
+          label,
           ...description !== void 0 ? { description } : {}
         });
       }
@@ -582,19 +536,19 @@ function parseAcpOptions(payload, fallback = DEFAULT_ANTIGRAVITY_OPTIONS) {
   if (models.length === 0 && availableModels.length > 0) {
     const seen = /* @__PURE__ */ new Set();
     for (const item of availableModels) {
-      const entry = asRecord2(item);
+      const entry = asRecord(item);
       const rawId = typeof entry?.modelId === "string" ? entry.modelId : void 0;
       if (!rawId) continue;
       const { baseModelId } = splitCombinedModelAndEffort(rawId);
       if (seen.has(baseModelId)) continue;
       seen.add(baseModelId);
       const rawName = typeof entry?.name === "string" ? entry.name : baseModelId;
-      const cleanName = rawName.replace(/\s*\((Low|Medium|High)\)\s*$/i, "");
+      const label = rawName.replace(/\s*\((Low|Medium|High)\)\s*$/i, "").trim() || baseModelId;
       const description = typeof entry?.description === "string" ? entry.description : void 0;
       const knownEfforts = modelEffortsMap.get(baseModelId);
       models.push({
         id: baseModelId,
-        name: cleanName,
+        label,
         ...description !== void 0 ? { description } : {},
         ...knownEfforts && knownEfforts.length > 0 ? { efforts: knownEfforts } : {}
       });
@@ -607,17 +561,17 @@ function parseAcpOptions(payload, fallback = DEFAULT_ANTIGRAVITY_OPTIONS) {
       currentEffortId = split.effortId;
     }
   }
-  const modesBlock = asRecord2(rec.modes);
+  const modesBlock = asRecord(rec.modes);
   if (modes.length === 0 && Array.isArray(modesBlock?.availableModes)) {
     for (const rawMode of modesBlock.availableModes) {
-      const m = asRecord2(rawMode);
+      const m = asRecord(rawMode);
       const id = typeof m?.id === "string" ? m.id : void 0;
       if (!id) continue;
-      const name = typeof m?.name === "string" ? m.name : id;
+      const label = typeof m?.name === "string" && m.name.trim().length > 0 ? m.name.trim() : typeof m?.label === "string" && m.label.trim().length > 0 ? m.label.trim() : id;
       const description = typeof m?.description === "string" ? m.description : void 0;
       modes.push({
         id,
-        name,
+        label,
         ...description !== void 0 ? { description } : {}
       });
     }
@@ -626,27 +580,31 @@ function parseAcpOptions(payload, fallback = DEFAULT_ANTIGRAVITY_OPTIONS) {
     currentModeId = modesBlock.currentModeId;
   }
   const finalModels = models.length > 0 ? models : fallback.models;
-  const finalModes = modes.length > 0 ? modes : DEFAULT_ANTIGRAVITY_MODES;
+  const finalModes = modes.length > 0 ? modes : fallback.modes.length > 0 ? fallback.modes : DEFAULT_ANTIGRAVITY_MODES;
   const resolvedModelId = currentModelId ?? fallback.currentModelId;
   const activeModel = finalModels.find((m) => m.id === resolvedModelId);
-  const finalEfforts = efforts.length > 0 ? efforts : activeModel?.efforts ? [...activeModel.efforts] : [];
-  const resolvedEffortId = finalEfforts.length > 0 ? currentEffortId ?? fallback.currentEffortId ?? finalEfforts[0] : void 0;
+  const activeModelEfforts = activeModel?.efforts ?? [];
+  const resolvedEffortId = activeModelEfforts.length > 0 ? currentEffortId && activeModelEfforts.includes(currentEffortId) ? currentEffortId : fallback.currentEffortId && activeModelEfforts.includes(fallback.currentEffortId) ? fallback.currentEffortId : activeModelEfforts[0] : void 0;
   const resolvedModeId = currentModeId ?? fallback.currentModeId;
+  const commands = Array.isArray(rec.availableCommands) ? parseAcpCommands(rec.availableCommands) : fallback.commands;
   return {
+    agentId: AGENT_ID,
     models: finalModels,
     ...resolvedModelId !== void 0 ? { currentModelId: resolvedModelId } : {},
-    efforts: finalEfforts,
     ...resolvedEffortId !== void 0 ? { currentEffortId: resolvedEffortId } : {},
     modes: finalModes,
-    ...resolvedModeId !== void 0 ? { currentModeId: resolvedModeId } : {}
+    ...resolvedModeId !== void 0 ? { currentModeId: resolvedModeId } : {},
+    modeConfirmed: true,
+    autoApprove: resolvedModeId === "auto",
+    commands
   };
 }
 
-// src/projector.ts
-function asRecord3(value) {
+// src/protocol-mapping.ts
+function asRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
-function pickString(rec, keys) {
+function pickNonEmptyString(rec, keys) {
   if (!rec) return void 0;
   for (const key of keys) {
     const val = rec[key];
@@ -656,71 +614,110 @@ function pickString(rec, keys) {
   }
   return void 0;
 }
-function extractToolPresentation(update) {
-  const kind = typeof update.kind === "string" ? update.kind : void 0;
-  const label = typeof update.title === "string" && update.title.trim().length > 0 ? update.title.trim() : typeof update.name === "string" && update.name.trim().length > 0 ? update.name.trim() : void 0;
-  const rawInput = asRecord3(update.rawInput);
-  const command = pickString(rawInput, ["CommandLine", "command", "cmd"]);
-  let path = pickString(rawInput, [
-    "Path",
-    "TargetFile",
-    "SearchDirectory",
-    "DirectoryPath",
-    "Cwd",
-    "path",
-    "file_path",
-    "filePath",
-    "target_file",
-    "Query",
-    "Pattern",
-    "Url"
-  ]);
-  if (!path && Array.isArray(update.locations)) {
-    for (const loc of update.locations) {
-      const locRec = asRecord3(loc);
-      if (typeof locRec?.path === "string" && locRec.path.trim().length > 0) {
-        path = locRec.path.trim();
-        break;
-      }
-    }
+function inferToolKindFromName(toolName, acpKind) {
+  const lower = toolName.toLowerCase();
+  const kindLower = acpKind?.toLowerCase() ?? "";
+  if (kindLower === "execute" || lower.includes("run_command") || lower.includes("bash") || lower.includes("shell")) {
+    return "shell";
   }
-  let outputPreview;
-  const rawOutput = asRecord3(update.rawOutput);
+  if (lower.startsWith("git") || lower.includes("_git")) {
+    return "git";
+  }
+  if (kindLower === "read" || kindLower === "edit" || kindLower === "delete" || kindLower === "move" || kindLower === "search" || lower.includes("file") || lower.includes("grep") || lower.includes("find") || lower.includes("dir")) {
+    return "filesystem";
+  }
+  if (kindLower === "fetch" || lower.includes("web") || lower.includes("url") || lower.includes("http")) {
+    return "web";
+  }
+  if (lower.includes("mcp")) {
+    return "mcp";
+  }
+  if (lower.includes("subagent") || lower.includes("swarm")) {
+    return "subagent";
+  }
+  if (lower.includes("task") || lower.includes("process")) {
+    return "process";
+  }
+  if (lower.includes("image")) {
+    return "image";
+  }
+  return "other";
+}
+var MAX_TOOL_OUTPUT_CHARS = 4e3;
+function extractAcpToolOutput(update) {
+  const rawOutput = asRecord2(update.rawOutput);
+  const exitCode = typeof rawOutput?.exit_code === "number" ? rawOutput.exit_code : typeof rawOutput?.exitCode === "number" ? rawOutput.exitCode : void 0;
   if (typeof rawOutput?.output === "string" && rawOutput.output.trim().length > 0) {
-    outputPreview = rawOutput.output.slice(0, 4e3);
-  } else if (Array.isArray(update.content)) {
+    const raw = rawOutput.output;
+    return {
+      text: raw.slice(0, MAX_TOOL_OUTPUT_CHARS),
+      ...raw.length > MAX_TOOL_OUTPUT_CHARS ? { truncated: true } : {},
+      ...exitCode !== void 0 ? { exitCode } : {}
+    };
+  }
+  let diffPath;
+  if (Array.isArray(update.content)) {
     const parts = [];
     for (const item of update.content) {
-      const block = asRecord3(item);
+      const block = asRecord2(item);
       if (!block) continue;
       if (block.type === "content") {
-        const inner = asRecord3(block.content);
+        const inner = asRecord2(block.content);
         if (inner?.type === "text" && typeof inner.text === "string") {
           parts.push(inner.text);
         }
       } else if (block.type === "text" && typeof block.text === "string") {
         parts.push(block.text);
       } else if (block.type === "diff" && typeof block.path === "string") {
-        if (!path) path = block.path;
+        if (!diffPath) diffPath = block.path;
       }
     }
     const joined = parts.join("\n").trim();
-    if (joined.length > 0) outputPreview = joined.slice(0, 4e3);
+    if (joined.length > 0) {
+      return {
+        text: joined.slice(0, MAX_TOOL_OUTPUT_CHARS),
+        ...joined.length > MAX_TOOL_OUTPUT_CHARS ? { truncated: true } : {},
+        ...exitCode !== void 0 ? { exitCode } : {},
+        ...diffPath !== void 0 ? { diffPath } : {}
+      };
+    }
   }
-  if (!kind && !label && !command && !path && !outputPreview) return void 0;
   return {
-    ...kind !== void 0 ? { kind } : {},
-    ...label !== void 0 ? { label } : {},
-    ...command !== void 0 ? { command } : {},
-    ...path !== void 0 ? { path } : {},
-    ...outputPreview !== void 0 ? { outputPreview } : {}
+    ...exitCode !== void 0 ? { exitCode } : {},
+    ...diffPath !== void 0 ? { diffPath } : {}
+  };
+}
+function buildPresentationFromToolState(state, options) {
+  return {
+    kind: state.kind,
+    title: state.title,
+    routedToolName: state.toolName,
+    startedAt: state.startedAt,
+    ...options?.endedAt !== void 0 ? { endedAt: options.endedAt } : {},
+    ...options?.durationMs !== void 0 ? { durationMs: options.durationMs } : {},
+    ...state.command !== void 0 ? { command: state.command } : {},
+    ...state.targetPaths !== void 0 && state.targetPaths.length > 0 ? { targetPaths: state.targetPaths } : {},
+    ...state.changedPaths !== void 0 && state.changedPaths.length > 0 ? { changedPaths: state.changedPaths } : {},
+    ...state.exitCode !== void 0 ? { exitCode: state.exitCode } : {},
+    ...state.outputText !== void 0 ? {
+      output: {
+        text: state.outputText,
+        ...state.outputTruncated ? { truncated: true } : {}
+      }
+    } : {},
+    ...options?.isError ? {
+      error: {
+        category: "execution",
+        message: state.outputText ?? `${state.title} failed`
+      }
+    } : {}
   };
 }
 function normalizePermissionOptions(rawOptions) {
   if (!Array.isArray(rawOptions)) return [];
   const options = [];
   for (const item of rawOptions) {
-    const rec = asRecord3(item);
+    const rec = asRecord2(item);
     if (!rec || typeof rec.optionId !== "string") continue;
     const label = typeof rec.name === "string" ? rec.name : typeof rec.label === "string" ? rec.label : rec.optionId;
     const rawKind = typeof rec.kind === "string" ? rec.kind : "";
@@ -729,19 +726,101 @@ function normalizePermissionOptions(rawOptions) {
   }
   return options;
 }
+function parseAntigravityPermissionPrompt(reqParams, runId) {
+  const rec = asRecord2(reqParams);
+  const toolCall = asRecord2(rec?.toolCall);
+  const rawInput = asRecord2(toolCall?.rawInput);
+  const toolName = pickNonEmptyString(toolCall, ["name", "title"]) ?? pickNonEmptyString(rec, ["action", "title"]) ?? "tool";
+  const title = pickNonEmptyString(toolCall, ["title", "name"]) ?? toolName;
+  const command = pickNonEmptyString(rawInput, ["CommandLine", "command", "cmd"]);
+  const pathVal = pickNonEmptyString(rawInput, ["Path", "TargetFile", "file_path", "filePath", "path"]);
+  const acpKind = typeof toolCall?.kind === "string" ? toolCall.kind.toLowerCase() : "";
+  let riskKind = "unknown";
+  if (command?.startsWith("git ") || toolName.toLowerCase().includes("git")) {
+    riskKind = "git";
+  } else if (command !== void 0 || acpKind === "execute" || toolName.toLowerCase().includes("command")) {
+    riskKind = "command";
+  } else if (acpKind === "edit" || acpKind === "delete" || toolName.toLowerCase().includes("write") || toolName.toLowerCase().includes("edit")) {
+    riskKind = "file-write";
+  } else if (acpKind === "fetch" || toolName.toLowerCase().includes("web") || toolName.toLowerCase().includes("http")) {
+    riskKind = "network";
+  } else if (toolName.toLowerCase().includes("mcp")) {
+    riskKind = "mcp";
+  }
+  const options = normalizePermissionOptions(rec?.options);
+  const detail = command ?? pathVal ?? (rawInput && Object.keys(rawInput).length > 0 ? JSON.stringify(rawInput).slice(0, 500) : title);
+  return {
+    action: title,
+    detail,
+    context: {
+      kind: riskKind,
+      summary: title,
+      ...command !== void 0 ? { command } : {},
+      ...pathVal !== void 0 ? { paths: [pathVal] } : {},
+      backendOptions: options,
+      backendAgentId: AGENT_ID
+    },
+    options,
+    ...runId !== void 0 ? { runId } : {}
+  };
+}
+function classifyAntigravityFailure(error) {
+  const raw = error instanceof Error ? error.message : String(error);
+  const lower = raw.toLowerCase();
+  const message = raw.slice(0, 500);
+  if (lower.includes("auth") || lower.includes("sign in") || lower.includes("unauthenticated") || lower.includes("401")) {
+    return { code: "provider-authentication", origin: "provider", message, retriable: false };
+  }
+  if (lower.includes("quota") || lower.includes("exhausted")) {
+    return { code: "provider-quota", origin: "provider", message, retriable: false };
+  }
+  if (lower.includes("rate limit") || lower.includes("429")) {
+    return { code: "provider-rate-limit", origin: "provider", message, retriable: true };
+  }
+  if (lower.includes("timeout") || lower.includes("timed out")) {
+    return { code: "model-request-timeout", origin: "transport", message, retriable: true };
+  }
+  if (lower.includes("exited") || lower.includes("closed")) {
+    return { code: "backend-worker-crash", origin: "runtime", message, retriable: true };
+  }
+  return { code: "unknown-agent-failure", origin: "runtime", message, retriable: false };
+}
+function mapAcpStopReason(rawStop, cancelled) {
+  if (cancelled || rawStop === "cancelled" || rawStop === "aborted") {
+    return { status: "aborted", stopReason: "aborted" };
+  }
+  if (rawStop === "max_tokens" || rawStop === "length" || rawStop === "max_turn_requests") {
+    return { status: "completed", stopReason: "length" };
+  }
+  if (rawStop === "tool_use" || rawStop === "toolUse") {
+    return { status: "completed", stopReason: "toolUse" };
+  }
+  if (rawStop === "refusal" || rawStop === "handled") {
+    return { status: "completed", stopReason: "handled" };
+  }
+  return { status: "completed", stopReason: "stop" };
+}
+
+// src/projector.ts
+function asRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
 var AcpSessionProjector = class {
   nextSeq = 1;
   activeRole;
   activeMessageId;
+  lastAssistantMessageId;
   activeRunId;
-  startedTools = /* @__PURE__ */ new Set();
-  endedTools = /* @__PURE__ */ new Set();
+  tools = /* @__PURE__ */ new Map();
   currentOptions;
   constructor(initialOptions) {
     this.currentOptions = initialOptions;
   }
   setRunId(runId) {
     this.activeRunId = runId;
+    if (runId !== void 0) {
+      this.lastAssistantMessageId = void 0;
+    }
   }
   getOptions() {
     return this.currentOptions;
@@ -753,7 +832,8 @@ var AcpSessionProjector = class {
   flushActiveMessage() {
     if (!this.activeMessageId) return [];
     const messageId = this.activeMessageId;
-    const runId = this.activeRunId;
+    const role = this.activeRole;
+    const runId = role === "assistant" ? this.activeRunId : void 0;
     this.activeMessageId = void 0;
     this.activeRole = void 0;
     return [
@@ -767,10 +847,38 @@ var AcpSessionProjector = class {
       }
     ];
   }
+  finishTurn(aborted = false) {
+    const emissions = [];
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const nowMs = Date.now();
+    for (const state of this.tools.values()) {
+      if (state.ended) continue;
+      state.ended = true;
+      const durationMs = Math.max(0, nowMs - state.startedMs);
+      emissions.push({
+        type: "agent",
+        event: {
+          type: "tool/end",
+          toolCallId: state.toolCallId,
+          isError: aborted,
+          ...state.responseMessageId !== void 0 ? { responseMessageId: state.responseMessageId } : {},
+          ...this.activeRunId !== void 0 ? { runId: this.activeRunId } : {},
+          presentation: buildPresentationFromToolState(state, {
+            endedAt: nowIso,
+            durationMs,
+            isError: aborted
+          })
+        }
+      });
+    }
+    emissions.push(...this.flushActiveMessage());
+    return emissions;
+  }
   projectSessionUpdate(update) {
     const kind = update.sessionUpdate;
     if (typeof kind !== "string") return [];
     if (kind === "user_message_chunk") {
+      if (this.activeRunId !== void 0) return [];
       return this.projectTextChunk("user", update);
     }
     if (kind === "agent_message_chunk") {
@@ -783,12 +891,19 @@ var AcpSessionProjector = class {
       return this.projectToolUpdate(kind, update);
     }
     if (kind === "available_commands_update") {
-      return this.projectCommandsUpdate(update);
+      const commands = parseAcpCommands(update.availableCommands);
+      this.currentOptions = { ...this.currentOptions, commands };
+      return [{ type: "options", options: this.currentOptions }];
     }
     if (kind === "current_mode_update") {
       const modeId = typeof update.currentModeId === "string" ? update.currentModeId : void 0;
       if (!modeId) return [];
-      this.currentOptions = { ...this.currentOptions, currentModeId: modeId };
+      this.currentOptions = {
+        ...this.currentOptions,
+        currentModeId: modeId,
+        modeConfirmed: true,
+        autoApprove: modeId === "auto"
+      };
       return [{ type: "options", options: this.currentOptions }];
     }
     if (kind === "config_option_update") {
@@ -796,37 +911,9 @@ var AcpSessionProjector = class {
       return [{ type: "options", options: this.currentOptions }];
     }
     if (kind === "session_info_update") {
-      const title = typeof update.title === "string" ? update.title : void 0;
-      const updatedAt = typeof update.updatedAt === "string" ? update.updatedAt : void 0;
-      if (title === void 0 && updatedAt === void 0) return [];
-      return [
-        {
-          type: "session_info",
-          ...title !== void 0 ? { title } : {},
-          ...updatedAt !== void 0 ? { updatedAt } : {}
-        }
-      ];
-    }
-    if (kind === "plan" && Array.isArray(update.entries)) {
-      const entries = [];
-      for (const item of update.entries) {
-        const rec = asRecord3(item);
-        if (!rec || typeof rec.content !== "string") continue;
-        const status = rec.status === "in_progress" || rec.status === "completed" ? rec.status : "pending";
-        const priority = rec.priority === "high" || rec.priority === "medium" || rec.priority === "low" ? rec.priority : void 0;
-        entries.push({
-          content: rec.content,
-          status,
-          ...priority !== void 0 ? { priority } : {}
-        });
-      }
-      return [
-        {
-          type: "plan",
-          entries,
-          ...this.activeRunId !== void 0 ? { runId: this.activeRunId } : {}
-        }
-      ];
+      const title = typeof update.title === "string" && update.title.trim().length > 0 ? update.title.trim() : void 0;
+      if (title === void 0) return [];
+      return [{ type: "title", title }];
     }
     return [];
   }
@@ -839,6 +926,11 @@ var AcpSessionProjector = class {
     this.nextSeq += 1;
     this.activeRole = role;
     this.activeMessageId = messageId;
+    if (role === "assistant") {
+      this.lastAssistantMessageId = messageId;
+    } else {
+      this.lastAssistantMessageId = void 0;
+    }
     const runId = role === "assistant" ? this.activeRunId : void 0;
     flushed.push({
       type: "agent",
@@ -874,10 +966,13 @@ var AcpSessionProjector = class {
     if (!text || text.length === 0) return [];
     const { emissions, messageId } = this.ensureMessage("assistant");
     emissions.push({
-      type: "thinking",
-      messageId,
-      delta: text,
-      ...this.activeRunId !== void 0 ? { runId: this.activeRunId } : {}
+      type: "agent",
+      event: {
+        type: "message/thinking_delta",
+        messageId,
+        delta: text,
+        ...this.activeRunId !== void 0 ? { runId: this.activeRunId } : {}
+      }
     });
     return emissions;
   }
@@ -886,85 +981,254 @@ var AcpSessionProjector = class {
     if (!toolCallId) return [];
     const rawStatus = typeof update.status === "string" ? update.status : void 0;
     const status = rawStatus === "completed" || rawStatus === "failed" || rawStatus === "in_progress" || rawStatus === "pending" ? rawStatus : kind === "tool_call" ? "in_progress" : "completed";
-    const toolName = typeof update.name === "string" && update.name.length > 0 ? update.name : typeof update.title === "string" && update.title.length > 0 ? update.title : "tool";
-    const presentation = extractToolPresentation(update);
+    const rawInput = asRecord3(update.rawInput);
+    const command = pickNonEmptyString(rawInput, ["CommandLine", "command", "cmd"]);
+    let pathVal = pickNonEmptyString(rawInput, [
+      "Path",
+      "TargetFile",
+      "SearchDirectory",
+      "DirectoryPath",
+      "Cwd",
+      "path",
+      "file_path",
+      "filePath",
+      "target_file"
+    ]);
+    if (!pathVal && Array.isArray(update.locations)) {
+      for (const loc of update.locations) {
+        const locRec = asRecord3(loc);
+        if (typeof locRec?.path === "string" && locRec.path.trim().length > 0) {
+          pathVal = locRec.path.trim();
+          break;
+        }
+      }
+    }
+    const extracted = extractAcpToolOutput(update);
+    if (!pathVal && extracted.diffPath) pathVal = extracted.diffPath;
     const runId = this.activeRunId;
     const emissions = [];
-    if (!this.startedTools.has(toolCallId)) {
-      if (this.activeRole === "user") {
-        emissions.push(...this.flushActiveMessage());
-      }
-      this.startedTools.add(toolCallId);
+    let state = this.tools.get(toolCallId);
+    if (!state) {
+      emissions.push(...this.flushActiveMessage());
+      const toolName = pickNonEmptyString(update, ["name", "title"]) ?? "tool";
+      const title = pickNonEmptyString(update, ["title", "name"]) ?? toolName;
+      const acpKind = typeof update.kind === "string" ? update.kind : void 0;
+      const nowMs = Date.now();
+      state = {
+        toolCallId,
+        toolName,
+        ...this.lastAssistantMessageId !== void 0 ? { responseMessageId: this.lastAssistantMessageId } : {},
+        kind: inferToolKindFromName(toolName, acpKind),
+        title,
+        ...command !== void 0 ? { command } : {},
+        ...pathVal !== void 0 ? { targetPaths: [pathVal] } : {},
+        ...extracted.diffPath !== void 0 ? { changedPaths: [extracted.diffPath] } : {},
+        ...extracted.text !== void 0 ? { outputText: extracted.text } : {},
+        ...extracted.truncated ? { outputTruncated: true } : {},
+        ...extracted.exitCode !== void 0 ? { exitCode: extracted.exitCode } : {},
+        startedAt: new Date(nowMs).toISOString(),
+        startedMs: nowMs,
+        ended: false
+      };
+      this.tools.set(toolCallId, state);
       emissions.push({
         type: "agent",
         event: {
           type: "tool/start",
           toolCallId,
-          toolName,
-          ...runId !== void 0 ? { runId } : {}
+          toolName: state.toolName,
+          ...state.responseMessageId !== void 0 ? { responseMessageId: state.responseMessageId } : {},
+          ...runId !== void 0 ? { runId } : {},
+          presentation: buildPresentationFromToolState(state)
         }
       });
-      emissions.push({
-        type: "tool",
-        toolCallId,
-        phase: "start",
-        status: status === "completed" || status === "failed" ? "in_progress" : status,
-        ...presentation !== void 0 ? { presentation } : {},
-        ...runId !== void 0 ? { runId } : {}
-      });
-    } else if (status === "pending" || status === "in_progress") {
-      emissions.push({
-        type: "tool",
-        toolCallId,
-        phase: "update",
-        status,
-        ...presentation !== void 0 ? { presentation } : {},
-        ...runId !== void 0 ? { runId } : {}
-      });
+    } else {
+      const updatedTitle = pickNonEmptyString(update, ["title"]);
+      if (updatedTitle !== void 0) state.title = updatedTitle;
+      if (command !== void 0) state.command = command;
+      if (pathVal !== void 0 && (!state.targetPaths || state.targetPaths.length === 0)) {
+        state.targetPaths = [pathVal];
+      }
+      if (extracted.diffPath !== void 0) state.changedPaths = [extracted.diffPath];
+      if (extracted.text !== void 0) state.outputText = extracted.text;
+      if (extracted.truncated) state.outputTruncated = true;
+      if (extracted.exitCode !== void 0) state.exitCode = extracted.exitCode;
+      if ((status === "pending" || status === "in_progress") && !state.ended) {
+        emissions.push({
+          type: "agent",
+          event: {
+            type: "tool/update",
+            toolCallId,
+            delta: extracted.text ?? "",
+            ...state.responseMessageId !== void 0 ? { responseMessageId: state.responseMessageId } : {},
+            ...runId !== void 0 ? { runId } : {},
+            presentation: buildPresentationFromToolState(state)
+          }
+        });
+      }
     }
-    if ((status === "completed" || status === "failed") && !this.endedTools.has(toolCallId)) {
-      this.endedTools.add(toolCallId);
-      emissions.push({
-        type: "tool",
-        toolCallId,
-        phase: "end",
-        status,
-        ...presentation !== void 0 ? { presentation } : {},
-        ...runId !== void 0 ? { runId } : {}
-      });
+    if ((status === "completed" || status === "failed") && !state.ended) {
+      state.ended = true;
+      const nowMs = Date.now();
+      const endedAt = new Date(nowMs).toISOString();
+      const durationMs = Math.max(0, nowMs - state.startedMs);
+      const isError = status === "failed";
       emissions.push({
         type: "agent",
         event: {
           type: "tool/end",
           toolCallId,
-          isError: status === "failed",
-          ...runId !== void 0 ? { runId } : {}
+          isError,
+          ...state.responseMessageId !== void 0 ? { responseMessageId: state.responseMessageId } : {},
+          ...runId !== void 0 ? { runId } : {},
+          presentation: buildPresentationFromToolState(state, { endedAt, durationMs, isError })
         }
       });
     }
     return emissions;
   }
-  projectCommandsUpdate(update) {
-    if (!Array.isArray(update.availableCommands)) return [];
-    const commands = [];
-    for (const rawCmd of update.availableCommands) {
-      const cmd = asRecord3(rawCmd);
-      if (!cmd || typeof cmd.name !== "string") continue;
-      const description = typeof cmd.description === "string" ? cmd.description : "";
-      const inputRec = asRecord3(cmd.input);
-      const inputHint = typeof inputRec?.hint === "string" ? inputRec.hint : void 0;
-      commands.push({
-        name: cmd.name,
-        description,
-        ...inputHint !== void 0 ? { inputHint } : {}
-      });
-    }
-    return [{ type: "commands", commands }];
-  }
 };
+
+// src/history.ts
+var MAX_LINE_CHARS = 512 * 1024;
+var MAX_EVENTS = 2e3;
+function asRecord4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function readUtf8(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return void 0;
+  }
+}
+function extractUserRequestText(rawContent) {
+  const match = rawContent.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i);
+  if (match && typeof match[1] === "string") {
+    return match[1].trim();
+  }
+  return rawContent.trim();
+}
+function antigravityTranscriptCandidates(sessionId, homeDir = process.env.HOME ?? homedir2()) {
+  return [
+    join2(homeDir, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl"),
+    join2(homeDir, ".gemini", "antigravity", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl")
+  ];
+}
+function buildHistoricalToolPresentation(toolName, args) {
+  const kind = inferToolKindFromName(toolName);
+  const command = typeof args?.CommandLine === "string" ? args.CommandLine : typeof args?.command === "string" ? args.command : void 0;
+  const pathVal = typeof args?.Path === "string" ? args.Path : typeof args?.TargetFile === "string" ? args.TargetFile : typeof args?.SearchDirectory === "string" ? args.SearchDirectory : typeof args?.path === "string" ? args.path : void 0;
+  const summary = typeof args?.toolSummary === "string" ? args.toolSummary : void 0;
+  return {
+    kind,
+    title: summary ?? toolName,
+    routedToolName: toolName,
+    ...command !== void 0 ? { command } : {},
+    ...pathVal !== void 0 ? { targetPaths: [pathVal] } : {}
+  };
+}
+function reconstructAntigravityHistory(input) {
+  if (!input.sessionId || input.sessionId.trim().length === 0) {
+    return { ok: false, reason: "native session id required" };
+  }
+  const reader = input.readFile ?? readUtf8;
+  let body;
+  for (const candidate of antigravityTranscriptCandidates(input.sessionId, input.homeDir)) {
+    body = reader(candidate);
+    if (body !== void 0) break;
+  }
+  if (body === void 0) {
+    return { ok: false, reason: "native transcript unavailable" };
+  }
+  const events = [];
+  let lastStatus;
+  let seq = 1;
+  for (const raw of body.split("\n")) {
+    if (events.length >= MAX_EVENTS) break;
+    const line = raw.trim();
+    if (line.length === 0 || line.length > MAX_LINE_CHARS) continue;
+    let record;
+    try {
+      const parsed = JSON.parse(line);
+      const rec = asRecord4(parsed);
+      if (!rec) continue;
+      record = rec;
+    } catch {
+      continue;
+    }
+    const stepIndex = typeof record.step_index === "number" ? record.step_index : seq++;
+    if (typeof record.status === "string") {
+      lastStatus = record.status;
+    }
+    if (record.type === "USER_INPUT" && typeof record.content === "string") {
+      const text = extractUserRequestText(record.content);
+      if (text.length === 0) continue;
+      const messageId = `agy-hist-user-${stepIndex}`;
+      events.push(
+        { type: "agent", event: { type: "message/start", messageId, role: "user" } },
+        { type: "agent", event: { type: "message/text_delta", messageId, delta: text } },
+        { type: "agent", event: { type: "message/end", messageId } }
+      );
+      continue;
+    }
+    if (record.type === "PLANNER_RESPONSE") {
+      const thinking = typeof record.thinking === "string" ? record.thinking.trim() : "";
+      const content = typeof record.content === "string" ? record.content.trim() : "";
+      const toolCalls = Array.isArray(record.tool_calls) ? record.tool_calls : [];
+      if (thinking.length === 0 && content.length === 0 && toolCalls.length === 0) continue;
+      const messageId = `agy-hist-assistant-${stepIndex}`;
+      events.push({ type: "agent", event: { type: "message/start", messageId, role: "assistant" } });
+      if (thinking.length > 0) {
+        events.push({ type: "agent", event: { type: "message/thinking_delta", messageId, delta: thinking } });
+      }
+      if (content.length > 0) {
+        events.push({ type: "agent", event: { type: "message/text_delta", messageId, delta: content } });
+      }
+      events.push({ type: "agent", event: { type: "message/end", messageId } });
+      let toolIdx = 0;
+      for (const rawTool of toolCalls) {
+        const tool = asRecord4(rawTool);
+        if (!tool || typeof tool.name !== "string") continue;
+        const toolCallId = `agy-hist-tool-${stepIndex}-${toolIdx++}`;
+        const args = asRecord4(tool.args) ?? asRecord4(tool.arguments);
+        const presentation = buildHistoricalToolPresentation(tool.name, args);
+        events.push(
+          {
+            type: "agent",
+            event: {
+              type: "tool/start",
+              toolCallId,
+              toolName: tool.name,
+              responseMessageId: messageId,
+              presentation
+            }
+          },
+          {
+            type: "agent",
+            event: {
+              type: "tool/end",
+              toolCallId,
+              isError: record.status === "ERROR",
+              responseMessageId: messageId,
+              presentation
+            }
+          }
+        );
+      }
+    }
+  }
+  if (events.length === 0) {
+    return { ok: false, reason: "native transcript empty" };
+  }
+  const activity = lastStatus === "IN_PROGRESS" || lastStatus === "RUNNING" || lastStatus === "PENDING" ? "running" : lastStatus === "DONE" || lastStatus === "ERROR" || lastStatus === "CANCELLED" ? "idle" : "unknown";
+  return { ok: true, events: events.slice(0, MAX_EVENTS), activity };
+}
 
 // src/prompt-content.ts
 import { readFileSync as readFileSync2 } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 var MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 function readBytes(path) {
   try {
@@ -973,10 +1237,24 @@ function readBytes(path) {
     return void 0;
   }
 }
-function buildAcpPromptBlocks(text, attachments, readFile = readBytes) {
+function buildAcpPromptBlocks(text, attachments, readFile = readBytes, contextRefs) {
   const blocks = [];
-  if (text.length > 0 || !Array.isArray(attachments) || attachments.length === 0) {
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  const hasRefs = Array.isArray(contextRefs) && contextRefs.length > 0;
+  if (text.length > 0 || !hasAttachments && !hasRefs) {
     blocks.push({ type: "text", text });
+  }
+  if (Array.isArray(contextRefs)) {
+    for (const rawRef of contextRefs) {
+      if (typeof rawRef !== "object" || rawRef === null) continue;
+      const ref = rawRef;
+      if (ref.kind === "file" && typeof ref.projectPath === "string" && typeof ref.relativePath === "string") {
+        const fullPath = isAbsolute(ref.relativePath) ? ref.relativePath : resolve(ref.projectPath, ref.relativePath);
+        const uri = pathToFileURL(fullPath).href;
+        const name = typeof ref.label === "string" && ref.label.trim().length > 0 ? ref.label.trim() : ref.relativePath;
+        blocks.push({ type: "resource_link", uri, name });
+      }
+    }
   }
   if (!Array.isArray(attachments) || attachments.length === 0) {
     return { ok: true, blocks };
@@ -1009,8 +1287,52 @@ function buildAcpPromptBlocks(text, attachments, readFile = readBytes) {
 }
 
 // src/session-runner.ts
-function asRecord4(value) {
+function asRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+async function applyRequestedBindingChoices(acp, backendSessionId, projector, binding) {
+  let options = projector.getOptions();
+  if (!binding) return options;
+  const requestedModel = typeof binding.modelId === "string" ? binding.modelId.trim() : "";
+  if (requestedModel.length > 0 && requestedModel !== options.currentModelId) {
+    const { baseModelId } = splitCombinedModelAndEffort(requestedModel);
+    try {
+      const res = await acp.request("session/set_config_option", {
+        sessionId: backendSessionId,
+        configId: "model",
+        value: baseModelId
+      });
+      options = projector.updateOptionsFromPayload(res);
+    } catch {
+    }
+  }
+  const requestedEffort = typeof binding.effortId === "string" ? binding.effortId.trim() : "";
+  const activeModel = options.models.find((m) => m.id === options.currentModelId);
+  if (requestedEffort.length > 0 && requestedEffort !== options.currentEffortId && activeModel?.efforts?.includes(requestedEffort)) {
+    try {
+      const res = await acp.request("session/set_config_option", {
+        sessionId: backendSessionId,
+        configId: "thought_level",
+        value: requestedEffort
+      });
+      options = projector.updateOptionsFromPayload(res);
+    } catch {
+    }
+  }
+  const requestedMode = typeof binding.modeId === "string" ? binding.modeId.trim() : "";
+  if (requestedMode.length > 0 && requestedMode !== options.currentModeId) {
+    try {
+      await acp.request("session/set_mode", {
+        sessionId: backendSessionId,
+        modeId: requestedMode
+      });
+      options = projector.updateOptionsFromPayload({
+        modes: { currentModeId: requestedMode, availableModes: options.modes }
+      });
+    } catch {
+    }
+  }
+  return options;
 }
 async function openAntigravitySession(input) {
   const { frame, io: io2, sessions, ensureAcp } = input;
@@ -1018,23 +1340,42 @@ async function openAntigravitySession(input) {
     io2.write(errFrame(frame, "invalid-request", "session scope required"));
     return;
   }
-  const params = asRecord4(frame.params);
+  const sessionScope = frame.scope;
+  const params = asRecord5(frame.params);
   const cwd = typeof params?.cwd === "string" && params.cwd.length > 0 ? params.cwd : process.cwd();
-  const binding = asRecord4(params?.binding);
+  const binding = asRecord5(params?.binding);
   const storedId = typeof binding?.backendSessionId === "string" ? binding.backendSessionId.trim() : "";
   if ((frame.method === "session/load" || frame.method === "session/resume") && storedId.length === 0) {
     io2.write(errFrame(frame, "invalid-request", "native session id required"));
     return;
   }
-  const existing = sessions.get(frame.scope.sessionId);
+  const existing = sessions.get(sessionScope.sessionId);
   if (frame.method !== "session/new" && existing && existing.backendSessionId === storedId) {
+    existing.scope = sessionScope;
+    const isLoad2 = frame.method === "session/load";
+    if (isLoad2 && input.replayStreaming === true) {
+      for (const emission of existing.replay) {
+        io2.write(eventFrame(sessionScope, emission));
+      }
+      io2.write(
+        okFrame(frame, {
+          backendSessionId: existing.backendSessionId,
+          ...input.agentVersion !== void 0 ? { agentVersion: input.agentVersion } : {},
+          capabilities: antigravityCapabilities(),
+          options: existing.projector.getOptions(),
+          replayEvents: [],
+          streamedReplayEventCount: existing.replay.length
+        })
+      );
+      return;
+    }
     io2.write(
       okFrame(frame, {
         backendSessionId: existing.backendSessionId,
         ...input.agentVersion !== void 0 ? { agentVersion: input.agentVersion } : {},
         capabilities: antigravityCapabilities(),
         options: existing.projector.getOptions(),
-        replayEvents: frame.method === "session/load" ? existing.replay : []
+        replayEvents: isLoad2 ? existing.replay : []
       })
     );
     return;
@@ -1049,37 +1390,40 @@ async function openAntigravitySession(input) {
   const acp = await ensureAcp(appDataDir);
   const projector = new AcpSessionProjector(DEFAULT_ANTIGRAVITY_OPTIONS);
   const replay = [];
-  let commands = [];
   const stopCollect = acp.onNotification((method, noteParams) => {
     if (method !== "session/update") return;
-    const rec = asRecord4(noteParams);
+    const rec = asRecord5(noteParams);
     if (!rec) return;
     if (storedId.length > 0 && typeof rec.sessionId === "string" && rec.sessionId !== storedId) return;
-    const update = asRecord4(rec.update);
+    const update = asRecord5(rec.update);
     if (!update) return;
     for (const emission of projector.projectSessionUpdate(update)) {
-      if (emission.type === "commands") {
-        commands = [...emission.commands];
+      if (emission.type === "agent") {
+        replay.push(emission);
       }
-      replay.push(emission);
     }
   });
   let rpcResult;
   try {
     const rpcMethod = frame.method === "session/new" ? "session/new" : frame.method === "session/load" ? "session/load" : "session/resume";
     const rpcParams = frame.method === "session/new" ? { cwd, mcpServers: [] } : { sessionId: storedId, cwd, mcpServers: [] };
-    rpcResult = asRecord4(await acp.request(rpcMethod, rpcParams));
+    rpcResult = asRecord5(await acp.request(rpcMethod, rpcParams));
   } finally {
     stopCollect();
   }
-  replay.push(...projector.flushActiveMessage());
+  for (const emission of projector.finishTurn(false)) {
+    if (emission.type === "agent") {
+      replay.push(emission);
+    }
+  }
   const backendSessionId = typeof rpcResult?.sessionId === "string" && rpcResult.sessionId.length > 0 ? rpcResult.sessionId : storedId;
   if (!backendSessionId) {
     io2.write(errFrame(frame, "backend-error", "Antigravity ACP did not return a sessionId"));
     return;
   }
-  const options = projector.updateOptionsFromPayload(rpcResult);
-  if (frame.method === "session/load" && !replay.some((e) => e.type === "agent")) {
+  projector.updateOptionsFromPayload(rpcResult);
+  const options = await applyRequestedBindingChoices(acp, backendSessionId, projector, binding);
+  if (frame.method === "session/load" && replay.length === 0) {
     const fallbackHistory = reconstructAntigravityHistory({
       sessionId: backendSessionId,
       ...input.homeDir !== void 0 ? { homeDir: input.homeDir } : {},
@@ -1090,18 +1434,32 @@ async function openAntigravitySession(input) {
     }
   }
   const slot = {
+    scope: sessionScope,
     cwd,
     backendSessionId,
     appDataDir,
     projector,
-    commands,
     replay,
     cancelled: false,
     runningPrompt: false
   };
-  sessions.set(frame.scope.sessionId, slot);
-  if (commands.length > 0) {
-    io2.write(eventFrame(frame.scope, { type: "commands", commands }));
+  sessions.set(sessionScope.sessionId, slot);
+  const isLoad = frame.method === "session/load";
+  if (isLoad && input.replayStreaming === true) {
+    for (const emission of replay) {
+      io2.write(eventFrame(sessionScope, emission));
+    }
+    io2.write(
+      okFrame(frame, {
+        backendSessionId,
+        ...input.agentVersion !== void 0 ? { agentVersion: input.agentVersion } : {},
+        capabilities: antigravityCapabilities(),
+        options,
+        replayEvents: [],
+        streamedReplayEventCount: replay.length
+      })
+    );
+    return;
   }
   io2.write(
     okFrame(frame, {
@@ -1109,18 +1467,19 @@ async function openAntigravitySession(input) {
       ...input.agentVersion !== void 0 ? { agentVersion: input.agentVersion } : {},
       capabilities: antigravityCapabilities(),
       options,
-      replayEvents: frame.method === "session/new" ? [] : replay
+      replayEvents: isLoad ? replay : []
     })
   );
 }
 async function runAntigravityPrompt(input) {
   const { frame, io: io2, slot, acp, readMediaFile } = input;
   const sessionScope = frame.scope;
-  const params = asRecord4(frame.params);
+  slot.scope = sessionScope;
+  const params = asRecord5(frame.params);
   const runId = typeof params?.runId === "string" && params.runId.length > 0 ? params.runId : void 0;
-  const promptInput = asRecord4(params?.input);
+  const promptInput = asRecord5(params?.input);
   const text = typeof promptInput?.text === "string" ? promptInput.text : "";
-  const built = buildAcpPromptBlocks(text, promptInput?.attachments, readMediaFile);
+  const built = buildAcpPromptBlocks(text, promptInput?.attachments, readMediaFile, promptInput?.contextRefs);
   if (!built.ok) {
     io2.write(errFrame(frame, "invalid-request", built.reason));
     return;
@@ -1128,18 +1487,25 @@ async function runAntigravityPrompt(input) {
   slot.cancelled = false;
   slot.runningPrompt = true;
   slot.projector.setRunId(runId);
+  if (text.length > 0) {
+    const userMsgId = `agy-prompt-user-${Date.now()}`;
+    slot.replay.push(
+      { type: "agent", event: { type: "message/start", messageId: userMsgId, role: "user" } },
+      { type: "agent", event: { type: "message/text_delta", messageId: userMsgId, delta: text } },
+      { type: "agent", event: { type: "message/end", messageId: userMsgId } }
+    );
+  }
   const emit = (emission) => {
-    if (emission.type === "commands") {
-      slot.commands = [...emission.commands];
+    if (emission.type === "agent") {
+      slot.replay.push(emission);
     }
-    slot.replay.push(emission);
     io2.write(eventFrame(sessionScope, emission));
   };
   const stopNotes = acp.onNotification((method, noteParams) => {
     if (method !== "session/update") return;
-    const rec = asRecord4(noteParams);
+    const rec = asRecord5(noteParams);
     if (!rec || typeof rec.sessionId === "string" && rec.sessionId !== slot.backendSessionId) return;
-    const update = asRecord4(rec.update);
+    const update = asRecord5(rec.update);
     if (!update) return;
     for (const emission of slot.projector.projectSessionUpdate(update)) {
       emit(emission);
@@ -1147,21 +1513,8 @@ async function runAntigravityPrompt(input) {
   });
   const stopReqs = acp.onRequest(async (_id, method, reqParams) => {
     if (method === "session/request_permission") {
-      const rec = asRecord4(reqParams);
-      const toolCall = asRecord4(rec?.toolCall);
-      const toolCallId = typeof toolCall?.toolCallId === "string" ? toolCall.toolCallId : void 0;
-      const toolName = typeof toolCall?.title === "string" && toolCall.title.length > 0 ? toolCall.title : typeof toolCall?.name === "string" && toolCall.name.length > 0 ? toolCall.name : "tool";
-      const options = normalizePermissionOptions(rec?.options);
-      const decision = asRecord4(
-        await io2.callHost(sessionScope, "permission/request", {
-          action: toolName,
-          detail: JSON.stringify(toolCall?.rawInput ?? {}).slice(0, 500),
-          ...toolCallId !== void 0 ? { toolCallId } : {},
-          context: { kind: "tool", toolName },
-          options,
-          ...runId !== void 0 ? { runId } : {}
-        })
-      );
+      const prompt = parseAntigravityPermissionPrompt(reqParams, runId);
+      const decision = asRecord5(await io2.callHost(sessionScope, "permission/request", prompt));
       if (decision?.cancelled === true || typeof decision?.optionId !== "string") {
         return { outcome: { outcome: "cancelled" } };
       }
@@ -1170,18 +1523,18 @@ async function runAntigravityPrompt(input) {
     throw new Error(`Unsupported ACP client request: ${method}`);
   });
   try {
-    const promptRes = asRecord4(
+    const promptRes = asRecord5(
       await acp.request("session/prompt", {
         sessionId: slot.backendSessionId,
         prompt: built.blocks
       })
     );
-    for (const flushed of slot.projector.flushActiveMessage()) {
+    const rawStop = typeof promptRes?.stopReason === "string" ? promptRes.stopReason : "end_turn";
+    const outcome = mapAcpStopReason(rawStop, slot.cancelled);
+    for (const flushed of slot.projector.finishTurn(outcome.status === "aborted")) {
       emit(flushed);
     }
-    const rawStop = typeof promptRes?.stopReason === "string" ? promptRes.stopReason : "end_turn";
-    const aborted = slot.cancelled || rawStop === "cancelled" || rawStop === "aborted";
-    if (aborted) {
+    if (outcome.status === "aborted") {
       emit({
         type: "agent",
         event: {
@@ -1191,12 +1544,35 @@ async function runAntigravityPrompt(input) {
         }
       });
     }
-    io2.write(
-      okFrame(frame, {
-        status: aborted ? "aborted" : "ok",
-        stopReason: aborted ? "aborted" : rawStop
-      })
-    );
+    io2.write(okFrame(frame, outcome));
+  } catch (error) {
+    for (const flushed of slot.projector.finishTurn(true)) {
+      emit(flushed);
+    }
+    if (slot.cancelled) {
+      emit({
+        type: "agent",
+        event: {
+          type: "session/aborted",
+          sessionId: slot.backendSessionId,
+          ...runId !== void 0 ? { runId } : {}
+        }
+      });
+      io2.write(okFrame(frame, { status: "aborted", stopReason: "aborted" }));
+      return;
+    }
+    const failure = classifyAntigravityFailure(error);
+    emit({
+      type: "agent",
+      event: {
+        type: "error",
+        message: failure.message,
+        retriable: failure.retriable,
+        failure,
+        ...runId !== void 0 ? { runId } : {}
+      }
+    });
+    io2.write(okFrame(frame, { status: "failed", stopReason: "error", failure }));
   } finally {
     slot.runningPrompt = false;
     slot.projector.setRunId(void 0);
@@ -1215,7 +1591,7 @@ async function configureAntigravitySession(input) {
     return;
   }
   const acp = await ensureAcp(slot.appDataDir);
-  const params = asRecord4(frame.params);
+  const params = asRecord5(frame.params);
   let updatedOptions = slot.projector.getOptions();
   if (frame.method === "session/model") {
     const rawModelId = typeof params?.modelId === "string" ? params.modelId.trim() : "";
@@ -1230,7 +1606,8 @@ async function configureAntigravitySession(input) {
       value: baseModelId
     });
     updatedOptions = slot.projector.updateOptionsFromPayload(res);
-    if (effortId && updatedOptions.efforts.includes(effortId)) {
+    const activeModel = updatedOptions.models.find((m) => m.id === updatedOptions.currentModelId);
+    if (effortId && activeModel?.efforts?.includes(effortId)) {
       const effortRes = await acp.request("session/set_config_option", {
         sessionId: slot.backendSessionId,
         configId: "thought_level",
@@ -1268,7 +1645,7 @@ async function configureAntigravitySession(input) {
 }
 
 // src/plugin.ts
-function asRecord5(value) {
+function asRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 var AntigravityPlugin = class {
@@ -1293,11 +1670,12 @@ var AntigravityPlugin = class {
   async dispatch(frame) {
     switch (frame.method) {
       case "plugin/initialize": {
-        const params = asRecord5(frame.params);
-        const runtime = asRecord5(params?.runtime);
-        const caps = asRecord5(params?.hostCapabilities);
+        const params = asRecord6(frame.params);
+        const runtime = asRecord6(params?.runtime);
+        const caps = asRecord6(params?.hostCapabilities);
         this.hostBinaryPath = typeof runtime?.binaryPath === "string" ? runtime.binaryPath : void 0;
         this.hostCapabilities = {
+          replayStreaming: caps?.replayStreaming === true,
           nativeCliLaunch: caps?.nativeCliLaunch === true,
           nativeUserInput: caps?.nativeUserInput === true
         };
@@ -1324,8 +1702,10 @@ var AntigravityPlugin = class {
         await this.nativeObserve(frame);
         return;
       case "catalog/rename":
+        this.deps.io.write(okFrame(frame, null));
+        return;
       case "catalog/delete":
-        this.deps.io.write(errFrame(frame, "unsupported", `${frame.method} is not supported by Antigravity ACP`));
+        this.deps.io.write(errFrame(frame, "unsupported", "Antigravity conversations are managed natively; archive in piwin instead"));
         return;
       case "session/new":
       case "session/load":
@@ -1335,6 +1715,7 @@ var AntigravityPlugin = class {
           io: this.deps.io,
           sessions: this.sessions,
           ensureAcp: (dir) => this.ensureAcp(dir),
+          ...this.hostCapabilities.replayStreaming !== void 0 ? { replayStreaming: this.hostCapabilities.replayStreaming } : {},
           ...this.agentVersion !== void 0 ? { agentVersion: this.agentVersion } : {},
           ...this.deps.homeDir !== void 0 ? { homeDir: this.deps.homeDir } : {},
           ...this.deps.fileExists !== void 0 ? { fileExists: this.deps.fileExists } : {},
@@ -1362,9 +1743,15 @@ var AntigravityPlugin = class {
       }
       case "session/commands": {
         const slot = frame.scope.kind === "session" ? this.sessions.get(frame.scope.sessionId) : void 0;
-        this.deps.io.write(okFrame(frame, slot?.commands ?? []));
+        this.deps.io.write(okFrame(frame, slot ? slot.projector.getOptions().commands : []));
         return;
       }
+      case "session/mcp-status":
+        this.deps.io.write(okFrame(frame, { servers: [], observed: false }));
+        return;
+      case "session/workflows":
+        this.deps.io.write(okFrame(frame, []));
+        return;
       case "session/cli-launch":
         this.cliLaunch(frame);
         return;
@@ -1382,17 +1769,17 @@ var AntigravityPlugin = class {
       ...this.deps.homeDir !== void 0 ? { homeDir: this.deps.homeDir } : {}
     });
   }
-  async ensureAcp(appDataDir = "antigravity") {
+  async ensureAcp(appDataDir = "antigravity-cli") {
     if (this.deps.acp !== void 0) {
       if (!this.acpClients.has(appDataDir)) {
-        const initRes2 = asRecord5(
+        const initRes2 = asRecord6(
           await this.deps.acp.request("initialize", {
             protocolVersion: 1,
             clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-            clientInfo: { name: "piwin", version: "0.1.0" }
+            clientInfo: { name: "piwin", version: "0.1.1" }
           })
         );
-        const agentInfo2 = asRecord5(initRes2?.agentInfo);
+        const agentInfo2 = asRecord6(initRes2?.agentInfo);
         if (typeof agentInfo2?.version === "string") this.agentVersion = agentInfo2.version;
         this.acpClients.set(appDataDir, this.deps.acp);
       }
@@ -1404,17 +1791,23 @@ var AntigravityPlugin = class {
     if (!binaryPath) throw new Error("Antigravity CLI (agy) executable not found");
     if (!this.deps.createAcp) throw new Error("Antigravity ACP factory is not configured");
     const client = this.deps.createAcp({ binaryPath, appDataDir });
-    client.onExit?.(() => {
+    client.onExit?.((reason) => {
       this.acpClients.delete(appDataDir);
+      for (const [sessionId, slot] of this.sessions) {
+        if (slot.appDataDir === appDataDir) {
+          this.sessions.delete(sessionId);
+          this.deps.io.write(eventFrame(slot.scope, { type: "closed", reason }));
+        }
+      }
     });
-    const initRes = asRecord5(
+    const initRes = asRecord6(
       await client.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        clientInfo: { name: "piwin", version: "0.1.0" }
+        clientInfo: { name: "piwin", version: "0.1.1" }
       })
     );
-    const agentInfo = asRecord5(initRes?.agentInfo);
+    const agentInfo = asRecord6(initRes?.agentInfo);
     if (typeof agentInfo?.version === "string") this.agentVersion = agentInfo.version;
     this.acpClients.set(appDataDir, client);
     return client;
@@ -1464,16 +1857,18 @@ var AntigravityPlugin = class {
     );
   }
   async catalogList(frame) {
-    const params = asRecord5(frame.params);
+    const params = asRecord6(frame.params);
     const cwd = typeof params?.cwd === "string" && params.cwd.length > 0 ? params.cwd : void 0;
-    const acp = await this.ensureAcp("antigravity");
-    const raw = asRecord5(await acp.request("session/list", cwd ? { cwd } : {}));
+    const acp = await this.ensureAcp("antigravity-cli");
+    const raw = asRecord6(await acp.request("session/list", cwd ? { cwd } : {}));
     const sessions = Array.isArray(raw?.sessions) ? raw.sessions : [];
     const entries = [];
+    const seenIds = /* @__PURE__ */ new Set();
     for (const item of sessions) {
-      const rec = asRecord5(item);
+      const rec = asRecord6(item);
       const backendSessionId = typeof rec?.sessionId === "string" ? rec.sessionId : void 0;
-      if (!backendSessionId) continue;
+      if (!backendSessionId || seenIds.has(backendSessionId)) continue;
+      seenIds.add(backendSessionId);
       const title = typeof rec?.title === "string" && rec.title.trim().length > 0 ? rec.title.trim() : void 0;
       const itemCwd = typeof rec?.cwd === "string" && rec.cwd.trim().length > 0 ? rec.cwd.trim() : void 0;
       const updatedAt = typeof rec?.updatedAt === "string" ? Date.parse(rec.updatedAt) : Number.NaN;
@@ -1484,10 +1879,19 @@ var AntigravityPlugin = class {
         ...Number.isFinite(updatedAt) ? { lastChangeUnixMs: updatedAt } : {}
       });
     }
+    const listDb = this.deps.listCliConversations ?? listCliConversationDbFiles;
+    for (const dbEntry of listDb(this.deps.homeDir)) {
+      if (seenIds.has(dbEntry.backendSessionId)) continue;
+      seenIds.add(dbEntry.backendSessionId);
+      entries.push({
+        backendSessionId: dbEntry.backendSessionId,
+        lastChangeUnixMs: dbEntry.lastChangeUnixMs
+      });
+    }
     this.deps.io.write(okFrame(frame, entries));
   }
   async nativeObserve(frame) {
-    const params = asRecord5(frame.params);
+    const params = asRecord6(frame.params);
     const backendSessionId = typeof params?.backendSessionId === "string" ? params.backendSessionId.trim() : "";
     if (backendSessionId.length === 0) {
       this.deps.io.write(errFrame(frame, "invalid-request", "native session id required"));
@@ -1549,8 +1953,8 @@ var AntigravityPlugin = class {
       return;
     }
     const slot = this.sessions.get(frame.scope.sessionId);
-    const params = asRecord5(frame.params);
-    const binding = asRecord5(params?.binding);
+    const params = asRecord6(frame.params);
+    const binding = asRecord6(params?.binding);
     const backendSessionId = slot?.backendSessionId ?? (typeof binding?.backendSessionId === "string" ? binding.backendSessionId.trim() : "");
     if (!backendSessionId) {
       this.deps.io.write(errFrame(frame, "invalid-request", "no session"));
@@ -1579,8 +1983,8 @@ function createCallbackIo(write2, waiters2) {
     write: write2,
     callHost(scope, method, params) {
       const requestId = `cb-${seq += 1}`;
-      return new Promise((resolve, reject) => {
-        waiters2.set(requestId, { resolve, reject });
+      return new Promise((resolve2, reject) => {
+        waiters2.set(requestId, { resolve: resolve2, reject });
         write2(requestFrame(scope, requestId, method, params));
       });
     }
@@ -1598,7 +2002,7 @@ var plugin = new AntigravityPlugin({
   io,
   createAcp: ({ binaryPath, appDataDir }) => createAcpStdio({ binaryPath, appDataDir }),
   probeBinary(binaryPath) {
-    return new Promise((resolve) => {
+    return new Promise((resolve2) => {
       const child = spawn2(binaryPath, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
@@ -1611,16 +2015,16 @@ var plugin = new AntigravityPlugin({
         stderr += chunk;
       });
       child.on("error", () => {
-        resolve({ ok: false });
+        resolve2({ ok: false });
       });
       child.on("close", (code) => {
         if (code !== 0 || isUnusableAntigravityProbe({ stderr })) {
-          resolve({ ok: false });
+          resolve2({ ok: false });
           return;
         }
         const firstLine = stdout.trim().split("\n")[0]?.trim() ?? "";
         const match = firstLine.match(/(\d+\.\d+\.\d+)/);
-        resolve({ ok: true, version: match?.[1] ?? (firstLine || "unknown") });
+        resolve2({ ok: true, version: match?.[1] ?? (firstLine || "unknown") });
       });
     });
   }

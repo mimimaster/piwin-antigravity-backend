@@ -36,8 +36,8 @@ describe('resolveAntigravityBinary', () => {
     expect(isUnusableAntigravityProbe({ stderr: '' })).toBe(false);
   });
 
-  it('resolves app-data-dir to antigravity by default and antigravity-cli when CLI db exists', () => {
-    expect(resolveAntigravityAppDataDir(undefined)).toBe('antigravity');
+  it('defaults app-data-dir to antigravity-cli for new sessions and falls back to antigravity for IDE sessions', () => {
+    expect(resolveAntigravityAppDataDir(undefined)).toBe('antigravity-cli');
     expect(
       resolveAntigravityAppDataDir('sess-cli', {
         homeDir: '/Users/demo',

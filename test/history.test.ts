@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractUserRequestText, reconstructAntigravityHistory } from '../src/history.js';
 
 describe('reconstructAntigravityHistory', () => {
-  it('extracts <USER_REQUEST> inner text and reconstructs thinking + tool calls + content', () => {
+  it('extracts <USER_REQUEST> inner text and reconstructs only valid AgentPluginAgentEmission frames', () => {
     expect(
       extractUserRequestText('<USER_REQUEST>\nHello Antigravity!\n</USER_REQUEST>\n<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>'),
     ).toBe('Hello Antigravity!');
@@ -34,7 +34,12 @@ describe('reconstructAntigravityHistory', () => {
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.activity).toBe('idle');
+    for (const item of res.events) {
+      expect(item.type).toBe('agent');
+      expect(typeof item.event.type).toBe('string');
+    }
     expect(JSON.stringify(res.events)).toContain('Build an ACP extension');
+    expect(JSON.stringify(res.events)).toContain('message/thinking_delta');
     expect(JSON.stringify(res.events)).toContain('Checking contracts first.');
     expect(JSON.stringify(res.events)).toContain('I will build the extension.');
     expect(JSON.stringify(res.events)).toContain('read_file');

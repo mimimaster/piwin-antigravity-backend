@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { SessionEmission } from './types.js';
+import { inferToolKindFromName } from './projector.js';
+import type { AgentPluginAgentEmission, ToolPresentation } from './types.js';
 
 export type AntigravityHistoryResult =
-  | { ok: true; events: SessionEmission[]; activity: 'idle' | 'running' | 'unknown' }
+  | { ok: true; events: AgentPluginAgentEmission[]; activity: 'idle' | 'running' | 'unknown' }
   | { ok: false; reason: string };
 
 const MAX_LINE_CHARS = 512 * 1024;
@@ -37,9 +38,32 @@ export function antigravityTranscriptCandidates(
   homeDir: string = process.env.HOME ?? homedir(),
 ): readonly string[] {
   return [
-    join(homeDir, '.gemini', 'antigravity', 'brain', sessionId, '.system_generated', 'logs', 'transcript.jsonl'),
     join(homeDir, '.gemini', 'antigravity-cli', 'brain', sessionId, '.system_generated', 'logs', 'transcript.jsonl'),
+    join(homeDir, '.gemini', 'antigravity', 'brain', sessionId, '.system_generated', 'logs', 'transcript.jsonl'),
   ];
+}
+
+function buildHistoricalToolPresentation(toolName: string, args: Record<string, unknown> | undefined): ToolPresentation {
+  const kind = inferToolKindFromName(toolName);
+  const command = typeof args?.CommandLine === 'string' ? args.CommandLine : typeof args?.command === 'string' ? args.command : undefined;
+  const pathVal =
+    typeof args?.Path === 'string'
+      ? args.Path
+      : typeof args?.TargetFile === 'string'
+        ? args.TargetFile
+        : typeof args?.SearchDirectory === 'string'
+          ? args.SearchDirectory
+          : typeof args?.path === 'string'
+            ? args.path
+            : undefined;
+  const summary = typeof args?.toolSummary === 'string' ? args.toolSummary : undefined;
+  return {
+    kind,
+    title: summary ?? toolName,
+    routedToolName: toolName,
+    ...(command !== undefined ? { command } : {}),
+    ...(pathVal !== undefined ? { targetPaths: [pathVal] } : {}),
+  };
 }
 
 export function reconstructAntigravityHistory(input: {
@@ -60,7 +84,7 @@ export function reconstructAntigravityHistory(input: {
     return { ok: false, reason: 'native transcript unavailable' };
   }
 
-  const events: SessionEmission[] = [];
+  const events: AgentPluginAgentEmission[] = [];
   let lastStatus: string | undefined;
   let seq = 1;
 
@@ -102,24 +126,43 @@ export function reconstructAntigravityHistory(input: {
       if (thinking.length === 0 && content.length === 0 && toolCalls.length === 0) continue;
 
       const messageId = `agy-hist-assistant-${stepIndex}`;
-      if (thinking.length > 0 || content.length > 0) {
-        events.push({ type: 'agent', event: { type: 'message/start', messageId, role: 'assistant' } });
-        if (thinking.length > 0) {
-          events.push({ type: 'thinking', messageId, delta: thinking });
-        }
-        if (content.length > 0) {
-          events.push({ type: 'agent', event: { type: 'message/text_delta', messageId, delta: content } });
-        }
-        events.push({ type: 'agent', event: { type: 'message/end', messageId } });
+      events.push({ type: 'agent', event: { type: 'message/start', messageId, role: 'assistant' } });
+      if (thinking.length > 0) {
+        events.push({ type: 'agent', event: { type: 'message/thinking_delta', messageId, delta: thinking } });
       }
+      if (content.length > 0) {
+        events.push({ type: 'agent', event: { type: 'message/text_delta', messageId, delta: content } });
+      }
+      events.push({ type: 'agent', event: { type: 'message/end', messageId } });
+
       let toolIdx = 0;
       for (const rawTool of toolCalls) {
         const tool = asRecord(rawTool);
         if (!tool || typeof tool.name !== 'string') continue;
         const toolCallId = `agy-hist-tool-${stepIndex}-${toolIdx++}`;
+        const args = asRecord(tool.args) ?? asRecord(tool.arguments);
+        const presentation = buildHistoricalToolPresentation(tool.name, args);
         events.push(
-          { type: 'agent', event: { type: 'tool/start', toolCallId, toolName: tool.name } },
-          { type: 'agent', event: { type: 'tool/end', toolCallId, isError: record.status === 'ERROR' } },
+          {
+            type: 'agent',
+            event: {
+              type: 'tool/start',
+              toolCallId,
+              toolName: tool.name,
+              responseMessageId: messageId,
+              presentation,
+            },
+          },
+          {
+            type: 'agent',
+            event: {
+              type: 'tool/end',
+              toolCallId,
+              isError: record.status === 'ERROR',
+              responseMessageId: messageId,
+              presentation,
+            },
+          },
         );
       }
     }

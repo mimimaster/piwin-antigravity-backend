@@ -14,7 +14,7 @@ function req(
 }
 
 describe('AntigravityPlugin full loopback', () => {
-  it('handles initialize, check, catalog/list, session/new, prompt, permission, cancel, model/effort/mode, cli-launch, and load', async () => {
+  it('handles initialize, check, catalog/list (with 0-turn CLI db supplement), session/new, prompt, permission, cancel, model/effort/mode, cli-launch, and streaming load', async () => {
     const written: Frame[] = [];
     const waiters = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
     const io = createCallbackIo((frame) => written.push(frame), waiters);
@@ -33,7 +33,7 @@ describe('AntigravityPlugin full loopback', () => {
     const noteHandlers = new Set<(method: string, params: unknown) => void>();
     let reqHandler: ((id: string | number, method: string, params: unknown) => Promise<unknown>) | undefined;
     const notificationsSent: string[] = [];
-    let currentModel = 'gemini-4-argon';
+    let currentModel = 'gemini-4-carbon';
     let currentEffort = 'medium';
     let currentMode = 'default';
 
@@ -75,6 +75,7 @@ describe('AntigravityPlugin full loopback', () => {
                 id: 'model',
                 currentValue: currentModel,
                 options: [
+                  { value: 'gemini-4-carbon', name: 'Gemini 4 Carbon' },
                   { value: 'gemini-4-argon', name: 'Gemini 4 Argon' },
                   { value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
                 ],
@@ -127,7 +128,7 @@ describe('AntigravityPlugin full loopback', () => {
               sessionId: 'agy-conv-1',
               update: {
                 sessionUpdate: 'agent_thought_chunk',
-                content: { type: 'text', text: 'Thinking with Gemini 4 Argon...' },
+                content: { type: 'text', text: 'Thinking with Gemini 4 Carbon...' },
               },
             });
           }
@@ -205,6 +206,9 @@ describe('AntigravityPlugin full loopback', () => {
       io,
       acp: mockAcp,
       pathExists: (p) => p === '/Applications/Gemini.app/Contents/Helpers/agy',
+      listCliConversations: () => [
+        { backendSessionId: '4504285c-d919-4c60-9d8a-7468c828f00c', lastChangeUnixMs: 1700000000000 },
+      ],
       env: { PATH: '' },
       now: () => '2026-11-11T12:00:00Z',
     });
@@ -215,7 +219,7 @@ describe('AntigravityPlugin full loopback', () => {
         pluginRevision: 'rev-1',
         hostProtocolVersion: 1,
         runtime: { binaryPath: 'agy' },
-        hostCapabilities: { nativeCliLaunch: true, nativeUserInput: true },
+        hostCapabilities: { replayStreaming: true, nativeCliLaunch: true, nativeUserInput: true },
       }),
     );
     expect(written.at(-1)).toMatchObject({
@@ -243,6 +247,10 @@ describe('AntigravityPlugin full loopback', () => {
           title: 'Antigravity Demo Session',
           cwd: '/work',
         },
+        {
+          backendSessionId: '4504285c-d919-4c60-9d8a-7468c828f00c',
+          lastChangeUnixMs: 1700000000000,
+        },
       ],
     });
 
@@ -251,10 +259,22 @@ describe('AntigravityPlugin full loopback', () => {
       ok: true,
       result: {
         backendSessionId: 'agy-conv-1',
+        capabilities: {
+          agentId: 'antigravity',
+          nativeCli: { supported: true },
+          operations: {
+            prompt: { supported: true },
+            setModel: { supported: true },
+            fork: { supported: false },
+          },
+        },
         options: {
-          currentModelId: 'gemini-4-argon',
+          agentId: 'antigravity',
+          currentModelId: 'gemini-4-carbon',
           currentEffortId: 'medium',
           currentModeId: 'default',
+          modeConfirmed: true,
+          commands: [{ name: 'plan', description: 'Create a detailed plan' }],
         },
       },
     });
@@ -269,7 +289,11 @@ describe('AntigravityPlugin full loopback', () => {
       req('session/prompt', { runId: 'run-1', input: { text: 'Hello Antigravity' } }, sessionScope),
     );
     expect(permissionIdx).toBe(1);
-    expect(JSON.stringify(written)).toContain('Thinking with Gemini 4 Argon...');
+    expect(written.at(-1)).toMatchObject({
+      ok: true,
+      result: { status: 'completed', stopReason: 'stop' },
+    });
+    expect(JSON.stringify(written)).toContain('Thinking with Gemini 4 Carbon...');
     expect(JSON.stringify(written)).toContain('AGY_RESPONSE_OK');
 
     await plugin.handle(req('session/model', { modelId: 'gemini-3.8-flash' }, sessionScope));
@@ -305,6 +329,7 @@ describe('AntigravityPlugin full loopback', () => {
     });
 
     const loadScope = { kind: 'session' as const, sessionId: 'host-sess-2', runtimeGenerationId: 'gen-2' };
+    const beforeLoadIdx = written.length;
     await plugin.handle(
       req(
         'session/load',
@@ -312,11 +337,11 @@ describe('AntigravityPlugin full loopback', () => {
         loadScope,
       ),
     );
-    const loaded = written.at(-1) as Extract<Frame, { kind: 'response'; ok: true }>;
+    const loadFrames = written.slice(beforeLoadIdx);
+    const loaded = loadFrames.at(-1) as Extract<Frame, { kind: 'response'; ok: true }>;
     expect(loaded.ok).toBe(true);
-    expect(JSON.stringify((loaded.result as { replayEvents: unknown[] }).replayEvents)).toContain(
-      'Prior Antigravity answer',
-    );
+    expect((loaded.result as { streamedReplayEventCount?: number }).streamedReplayEventCount).toBeGreaterThan(0);
+    expect(JSON.stringify(loadFrames)).toContain('Prior Antigravity answer');
 
     expect(parseFrame(JSON.stringify(req('check', {})))?.kind).toBe('request');
   });

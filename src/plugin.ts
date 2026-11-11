@@ -1,7 +1,7 @@
-import { resolveAntigravityBinary } from './binary.js';
+import { listCliConversationDbFiles, resolveAntigravityBinary } from './binary.js';
 import { DEFAULT_ANTIGRAVITY_OPTIONS } from './capabilities.js';
 import { antigravityCliLaunch } from './cli-launch.js';
-import { errFrame, okFrame, requestFrame } from './frames.js';
+import { errFrame, eventFrame, okFrame, requestFrame } from './frames.js';
 import { reconstructAntigravityHistory } from './history.js';
 import {
   configureAntigravitySession,
@@ -30,7 +30,11 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 export class AntigravityPlugin {
   private hostBinaryPath: string | undefined;
-  private hostCapabilities: { nativeCliLaunch?: boolean; nativeUserInput?: boolean } = {};
+  private hostCapabilities: {
+    replayStreaming?: boolean;
+    nativeCliLaunch?: boolean;
+    nativeUserInput?: boolean;
+  } = {};
   private readonly sessions = new Map<string, SessionSlot>();
   private readonly acpClients = new Map<'antigravity' | 'antigravity-cli', AcpPort>();
   private agentVersion: string | undefined;
@@ -42,6 +46,7 @@ export class AntigravityPlugin {
       createAcp?: (input: { binaryPath: string; appDataDir: 'antigravity' | 'antigravity-cli' }) => AcpPort;
       pathExists?: (path: string) => boolean;
       fileExists?: (path: string) => boolean;
+      listCliConversations?: (homeDir?: string) => { backendSessionId: string; lastChangeUnixMs: number }[];
       env?: NodeJS.ProcessEnv;
       homeDir?: string;
       now?: () => string;
@@ -70,6 +75,7 @@ export class AntigravityPlugin {
         const caps = asRecord(params?.hostCapabilities);
         this.hostBinaryPath = typeof runtime?.binaryPath === 'string' ? runtime.binaryPath : undefined;
         this.hostCapabilities = {
+          replayStreaming: caps?.replayStreaming === true,
           nativeCliLaunch: caps?.nativeCliLaunch === true,
           nativeUserInput: caps?.nativeUserInput === true,
         };
@@ -96,8 +102,10 @@ export class AntigravityPlugin {
         await this.nativeObserve(frame);
         return;
       case 'catalog/rename':
+        this.deps.io.write(okFrame(frame, null));
+        return;
       case 'catalog/delete':
-        this.deps.io.write(errFrame(frame, 'unsupported', `${frame.method} is not supported by Antigravity ACP`));
+        this.deps.io.write(errFrame(frame, 'unsupported', 'Antigravity conversations are managed natively; archive in piwin instead'));
         return;
       case 'session/new':
       case 'session/load':
@@ -107,6 +115,9 @@ export class AntigravityPlugin {
           io: this.deps.io,
           sessions: this.sessions,
           ensureAcp: (dir) => this.ensureAcp(dir),
+          ...(this.hostCapabilities.replayStreaming !== undefined
+            ? { replayStreaming: this.hostCapabilities.replayStreaming }
+            : {}),
           ...(this.agentVersion !== undefined ? { agentVersion: this.agentVersion } : {}),
           ...(this.deps.homeDir !== undefined ? { homeDir: this.deps.homeDir } : {}),
           ...(this.deps.fileExists !== undefined ? { fileExists: this.deps.fileExists } : {}),
@@ -134,9 +145,15 @@ export class AntigravityPlugin {
       }
       case 'session/commands': {
         const slot = frame.scope.kind === 'session' ? this.sessions.get(frame.scope.sessionId) : undefined;
-        this.deps.io.write(okFrame(frame, slot?.commands ?? []));
+        this.deps.io.write(okFrame(frame, slot ? slot.projector.getOptions().commands : []));
         return;
       }
+      case 'session/mcp-status':
+        this.deps.io.write(okFrame(frame, { servers: [], observed: false }));
+        return;
+      case 'session/workflows':
+        this.deps.io.write(okFrame(frame, []));
+        return;
       case 'session/cli-launch':
         this.cliLaunch(frame);
         return;
@@ -156,14 +173,14 @@ export class AntigravityPlugin {
     });
   }
 
-  private async ensureAcp(appDataDir: 'antigravity' | 'antigravity-cli' = 'antigravity'): Promise<AcpPort> {
+  private async ensureAcp(appDataDir: 'antigravity' | 'antigravity-cli' = 'antigravity-cli'): Promise<AcpPort> {
     if (this.deps.acp !== undefined) {
       if (!this.acpClients.has(appDataDir)) {
         const initRes = asRecord(
           await this.deps.acp.request('initialize', {
             protocolVersion: 1,
             clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-            clientInfo: { name: 'piwin', version: '0.1.0' },
+            clientInfo: { name: 'piwin', version: '0.1.1' },
           }),
         );
         const agentInfo = asRecord(initRes?.agentInfo);
@@ -181,14 +198,20 @@ export class AntigravityPlugin {
     if (!this.deps.createAcp) throw new Error('Antigravity ACP factory is not configured');
 
     const client = this.deps.createAcp({ binaryPath, appDataDir });
-    client.onExit?.(() => {
+    client.onExit?.((reason) => {
       this.acpClients.delete(appDataDir);
+      for (const [sessionId, slot] of this.sessions) {
+        if (slot.appDataDir === appDataDir) {
+          this.sessions.delete(sessionId);
+          this.deps.io.write(eventFrame(slot.scope, { type: 'closed', reason }));
+        }
+      }
     });
     const initRes = asRecord(
       await client.request('initialize', {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        clientInfo: { name: 'piwin', version: '0.1.0' },
+        clientInfo: { name: 'piwin', version: '0.1.1' },
       }),
     );
     const agentInfo = asRecord(initRes?.agentInfo);
@@ -248,14 +271,17 @@ export class AntigravityPlugin {
   private async catalogList(frame: Extract<Frame, { kind: 'request' }>): Promise<void> {
     const params = asRecord(frame.params);
     const cwd = typeof params?.cwd === 'string' && params.cwd.length > 0 ? params.cwd : undefined;
-    const acp = await this.ensureAcp('antigravity');
+    const acp = await this.ensureAcp('antigravity-cli');
     const raw = asRecord(await acp.request('session/list', cwd ? { cwd } : {}));
     const sessions = Array.isArray(raw?.sessions) ? raw.sessions : [];
     const entries: AgentPluginCatalogEntry[] = [];
+    const seenIds = new Set<string>();
+
     for (const item of sessions) {
       const rec = asRecord(item);
       const backendSessionId = typeof rec?.sessionId === 'string' ? rec.sessionId : undefined;
-      if (!backendSessionId) continue;
+      if (!backendSessionId || seenIds.has(backendSessionId)) continue;
+      seenIds.add(backendSessionId);
       const title = typeof rec?.title === 'string' && rec.title.trim().length > 0 ? rec.title.trim() : undefined;
       const itemCwd = typeof rec?.cwd === 'string' && rec.cwd.trim().length > 0 ? rec.cwd.trim() : undefined;
       const updatedAt = typeof rec?.updatedAt === 'string' ? Date.parse(rec.updatedAt) : Number.NaN;
@@ -266,6 +292,19 @@ export class AntigravityPlugin {
         ...(Number.isFinite(updatedAt) ? { lastChangeUnixMs: updatedAt } : {}),
       });
     }
+
+    // Supplement 0-turn conversations created in ~/.gemini/antigravity-cli/conversations/*.db
+    // so Host catalog sync never deletes newly opened sessions before their first prompt.
+    const listDb = this.deps.listCliConversations ?? listCliConversationDbFiles;
+    for (const dbEntry of listDb(this.deps.homeDir)) {
+      if (seenIds.has(dbEntry.backendSessionId)) continue;
+      seenIds.add(dbEntry.backendSessionId);
+      entries.push({
+        backendSessionId: dbEntry.backendSessionId,
+        lastChangeUnixMs: dbEntry.lastChangeUnixMs,
+      });
+    }
+
     this.deps.io.write(okFrame(frame, entries));
   }
 
