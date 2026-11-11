@@ -42,6 +42,14 @@ const declaration = {
   },
   compatibleRevisions: [],
   unversionedBindingCompatible: false,
+  outputDirectories: [
+    {
+      id: 'images',
+      base: 'working-directory',
+      relativePath: '.piwin-antigravity/images',
+      kind: 'image',
+    },
+  ],
 };
 
 await writeFile(join(root, 'piwin.json'), `${JSON.stringify({ sessionBackend: declaration }, null, 2)}\n`);

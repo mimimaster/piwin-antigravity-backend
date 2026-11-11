@@ -24,6 +24,14 @@
       "byteSize": 59994
     },
     "compatibleRevisions": [],
-    "unversionedBindingCompatible": false
+    "unversionedBindingCompatible": false,
+    "outputDirectories": [
+      {
+        "id": "images",
+        "base": "working-directory",
+        "relativePath": ".piwin-antigravity/images",
+        "kind": "image"
+      }
+    ]
   }
 }
