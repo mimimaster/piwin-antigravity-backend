@@ -19,6 +19,17 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 const EFFORT_SUFFIXES = ['low', 'medium', 'high'] as const;
 
+export function inferModelContextTokens(modelId: string, fallbackTokens?: number): number {
+  if (fallbackTokens !== undefined && Number.isFinite(fallbackTokens) && fallbackTokens > 0) {
+    return fallbackTokens;
+  }
+  const lower = modelId.toLowerCase();
+  if (lower.startsWith('gemini-') || lower.includes('gemini')) return 1_048_576;
+  if (lower.startsWith('claude-') || lower.includes('claude')) return 200_000;
+  if (lower.includes('120b') || lower.startsWith('gpt-')) return 128_000;
+  return 256_000;
+}
+
 export function splitCombinedModelAndEffort(rawModelId: string): {
   baseModelId: string;
   effortId?: string;
@@ -144,6 +155,7 @@ export function parseAcpOptions(
         models.push({
           id,
           label,
+          contextTokens: inferModelContextTokens(id, fallbackModel?.contextTokens),
           ...(description !== undefined ? { description } : {}),
           ...(knownEfforts && knownEfforts.length > 0 ? { efforts: knownEfforts } : {}),
         });
@@ -183,9 +195,11 @@ export function parseAcpOptions(
       const label = rawName.replace(/\s*\((Low|Medium|High)\)\s*$/i, '').trim() || baseModelId;
       const description = typeof entry?.description === 'string' ? entry.description : undefined;
       const knownEfforts = modelEffortsMap.get(baseModelId);
+      const fallbackModel = fallback.models.find((m) => m.id === baseModelId);
       models.push({
         id: baseModelId,
         label,
+        contextTokens: inferModelContextTokens(baseModelId, fallbackModel?.contextTokens),
         ...(description !== undefined ? { description } : {}),
         ...(knownEfforts && knownEfforts.length > 0 ? { efforts: knownEfforts } : {}),
       });

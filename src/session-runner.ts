@@ -343,6 +343,70 @@ export async function runAntigravityPrompt(input: {
     for (const flushed of slot.projector.finishTurn(outcome.status === 'aborted')) {
       emit(flushed);
     }
+    const usageRec = asRecord(promptRes?.usage);
+    if (usageRec) {
+      const inputTokens =
+        typeof usageRec.inputTokens === 'number' && Number.isFinite(usageRec.inputTokens)
+          ? usageRec.inputTokens
+          : undefined;
+      const outputTokens =
+        typeof usageRec.outputTokens === 'number' && Number.isFinite(usageRec.outputTokens)
+          ? usageRec.outputTokens
+          : undefined;
+      const cachedReadTokens =
+        typeof usageRec.cachedReadTokens === 'number' && Number.isFinite(usageRec.cachedReadTokens)
+          ? usageRec.cachedReadTokens
+          : undefined;
+      const cachedWriteTokens =
+        typeof usageRec.cachedWriteTokens === 'number' && Number.isFinite(usageRec.cachedWriteTokens)
+          ? usageRec.cachedWriteTokens
+          : undefined;
+      const thoughtTokens =
+        typeof usageRec.thoughtTokens === 'number' && Number.isFinite(usageRec.thoughtTokens)
+          ? usageRec.thoughtTokens
+          : undefined;
+      const totalTokens =
+        typeof usageRec.totalTokens === 'number' && Number.isFinite(usageRec.totalTokens)
+          ? usageRec.totalTokens
+          : (inputTokens ?? 0) + (outputTokens ?? 0);
+
+      const assistantMsg = slot.projector.ensureAssistantMessageId();
+      for (const msgEmission of assistantMsg.emissions) {
+        emit(msgEmission);
+      }
+      const messageId = assistantMsg.messageId;
+      const options = slot.projector.getOptions();
+      const currentModelId = options.currentModelId;
+      const currentEffort = options.currentEffortId;
+
+      emit({
+        type: 'agent',
+        event: {
+          type: 'usage/finalized',
+          measurement: {
+            measurementId: `${sessionScope.sessionId}:${messageId}:${runId ?? Date.now()}`,
+            sessionId: sessionScope.sessionId,
+            messageId,
+            ...(runId !== undefined ? { runId } : {}),
+            ...(sessionScope.runtimeGenerationId !== undefined
+              ? { runtimeGenerationId: sessionScope.runtimeGenerationId }
+              : {}),
+            ...(currentModelId !== undefined ? { modelId: currentModelId } : {}),
+            ...(currentEffort === 'low' || currentEffort === 'medium' || currentEffort === 'high'
+              ? { thinkingLevel: currentEffort }
+              : {}),
+            ...(inputTokens !== undefined ? { promptTokens: inputTokens } : {}),
+            ...(outputTokens !== undefined ? { completionTokens: outputTokens } : {}),
+            ...(cachedReadTokens !== undefined ? { cacheReadTokens: cachedReadTokens } : {}),
+            ...(cachedWriteTokens !== undefined ? { cacheWriteTokens: cachedWriteTokens } : {}),
+            ...(thoughtTokens !== undefined ? { reasoningTokens: thoughtTokens } : {}),
+            totalTokens,
+            stopReason: rawStop,
+            recordedAt: new Date().toISOString(),
+          },
+        },
+      });
+    }
     if (outcome.status === 'aborted') {
       emit({
         type: 'agent',

@@ -91,11 +91,13 @@ describe('options & capabilities contracts', () => {
     expect(parsed.models[0]).toEqual({
       id: 'gemini-4-carbon',
       label: 'Gemini 4 Carbon',
+      contextTokens: 1_048_576,
       efforts: ['low', 'medium', 'high'],
     });
     expect(parsed.models[2]).toEqual({
       id: 'gpt-oss-120b-medium',
       label: 'GPT-OSS 120B (Medium)',
+      contextTokens: 128_000,
     });
   });
 });

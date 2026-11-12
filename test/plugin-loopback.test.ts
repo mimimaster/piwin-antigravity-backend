@@ -156,7 +156,17 @@ describe('AntigravityPlugin full loopback', () => {
               },
             });
           }
-          return { stopReason: 'end_turn' };
+          return {
+            stopReason: 'end_turn',
+            usage: {
+              inputTokens: 120,
+              outputTokens: 30,
+              cachedReadTokens: 50,
+              cachedWriteTokens: 0,
+              thoughtTokens: 15,
+              totalTokens: 150,
+            },
+          };
         }
         if (method === 'session/set_config_option') {
           if (rec.configId === 'model' && typeof rec.value === 'string') currentModel = rec.value;
@@ -295,6 +305,28 @@ describe('AntigravityPlugin full loopback', () => {
     });
     expect(JSON.stringify(written)).toContain('Thinking with Gemini 4 Carbon...');
     expect(JSON.stringify(written)).toContain('AGY_RESPONSE_OK');
+    const finalizedFrame = written.find(
+      (f) =>
+        f.kind === 'event' &&
+        f.emission.type === 'agent' &&
+        f.emission.event.type === 'usage/finalized',
+    );
+    expect(finalizedFrame).toBeDefined();
+    if (
+      finalizedFrame &&
+      finalizedFrame.kind === 'event' &&
+      finalizedFrame.emission.type === 'agent' &&
+      finalizedFrame.emission.event.type === 'usage/finalized'
+    ) {
+      expect(finalizedFrame.emission.event.measurement).toMatchObject({
+        sessionId: 'host-sess-1',
+        promptTokens: 120,
+        completionTokens: 30,
+        cacheReadTokens: 50,
+        reasoningTokens: 15,
+        totalTokens: 150,
+      });
+    }
 
     await plugin.handle(req('session/model', { modelId: 'gemini-3.8-flash' }, sessionScope));
     expect(written.at(-1)).toMatchObject({

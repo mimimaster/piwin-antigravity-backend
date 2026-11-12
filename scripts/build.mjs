@@ -26,7 +26,7 @@ const declaration = {
   schemaVersion: 1,
   id: 'antigravity',
   name: 'Antigravity',
-  version: '0.1.1',
+  version: '0.1.2',
   minHostVersion: '0.0.0',
   protocol: 'piwin-agent-stdio',
   protocolVersion: 1,
@@ -42,6 +42,7 @@ const declaration = {
   },
   compatibleRevisions: [
     '27e6ee94bc267fd35d1fe277921449161f0dfb7aa7abc34a1be27d1539aae554',
+    'd56d746e57a13f7d84372760a33b42650ba3d85be035b8fbe9c21364f2855eb3',
   ],
   unversionedBindingCompatible: true,
   outputDirectories: [

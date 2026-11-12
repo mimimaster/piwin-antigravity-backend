@@ -46,6 +46,17 @@ export class AcpSessionProjector {
     return this.currentOptions;
   }
 
+  getLastAssistantMessageId(): string | undefined {
+    return this.lastAssistantMessageId;
+  }
+
+  ensureAssistantMessageId(): { emissions: AgentPluginEmission[]; messageId: string } {
+    if (this.lastAssistantMessageId) {
+      return { emissions: [], messageId: this.lastAssistantMessageId };
+    }
+    return this.ensureMessage('assistant');
+  }
+
   updateOptionsFromPayload(payload: unknown): SessionBackendOptions {
     this.currentOptions = parseAcpOptions(payload, this.currentOptions);
     return this.currentOptions;

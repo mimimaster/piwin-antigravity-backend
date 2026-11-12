@@ -316,36 +316,42 @@ var DEFAULT_ANTIGRAVITY_MODELS = [
     id: "gemini-4-carbon",
     label: "Gemini 4 Carbon",
     description: "Antigravity flagship Gemini 4 Carbon model with configurable thought level",
+    contextTokens: 1048576,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS
   },
   {
     id: "gemini-4-argon",
     label: "Gemini 4 Argon",
     description: "Antigravity Gemini 4 Argon model with configurable thought level",
+    contextTokens: 1048576,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS
   },
   {
     id: "gemini-3.8-flash",
     label: "Gemini 3.8 Flash",
     description: "Fast multimodal Gemini 3.8 Flash model with configurable thought level",
+    contextTokens: 1048576,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS
   },
   {
     id: "claude-opus-5-5",
     label: "Claude Opus 5.5",
     description: "Claude Opus 5.5 on Antigravity",
+    contextTokens: 2e5,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS
   },
   {
     id: "claude-sonnet-5-5",
     label: "Claude Sonnet 5.5",
     description: "Claude Sonnet 5.5 on Antigravity",
+    contextTokens: 2e5,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS
   },
   {
     id: "gpt-oss-120b-medium",
     label: "GPT-OSS 120B (Medium)",
-    description: "Open-weight 120B model on Antigravity"
+    description: "Open-weight 120B model on Antigravity",
+    contextTokens: 128e3
   }
 ];
 var DEFAULT_ANTIGRAVITY_MODES = [
@@ -424,6 +430,16 @@ function asRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 var EFFORT_SUFFIXES = ["low", "medium", "high"];
+function inferModelContextTokens(modelId, fallbackTokens) {
+  if (fallbackTokens !== void 0 && Number.isFinite(fallbackTokens) && fallbackTokens > 0) {
+    return fallbackTokens;
+  }
+  const lower = modelId.toLowerCase();
+  if (lower.startsWith("gemini-") || lower.includes("gemini")) return 1048576;
+  if (lower.startsWith("claude-") || lower.includes("claude")) return 2e5;
+  if (lower.includes("120b") || lower.startsWith("gpt-")) return 128e3;
+  return 256e3;
+}
 function splitCombinedModelAndEffort(rawModelId) {
   if (rawModelId === "gpt-oss-120b-medium") {
     return { baseModelId: rawModelId };
@@ -513,6 +529,7 @@ function parseAcpOptions(payload, fallback = DEFAULT_ANTIGRAVITY_OPTIONS) {
         models.push({
           id,
           label,
+          contextTokens: inferModelContextTokens(id, fallbackModel?.contextTokens),
           ...description !== void 0 ? { description } : {},
           ...knownEfforts && knownEfforts.length > 0 ? { efforts: knownEfforts } : {}
         });
@@ -546,9 +563,11 @@ function parseAcpOptions(payload, fallback = DEFAULT_ANTIGRAVITY_OPTIONS) {
       const label = rawName.replace(/\s*\((Low|Medium|High)\)\s*$/i, "").trim() || baseModelId;
       const description = typeof entry?.description === "string" ? entry.description : void 0;
       const knownEfforts = modelEffortsMap.get(baseModelId);
+      const fallbackModel = fallback.models.find((m) => m.id === baseModelId);
       models.push({
         id: baseModelId,
         label,
+        contextTokens: inferModelContextTokens(baseModelId, fallbackModel?.contextTokens),
         ...description !== void 0 ? { description } : {},
         ...knownEfforts && knownEfforts.length > 0 ? { efforts: knownEfforts } : {}
       });
@@ -824,6 +843,15 @@ var AcpSessionProjector = class {
   }
   getOptions() {
     return this.currentOptions;
+  }
+  getLastAssistantMessageId() {
+    return this.lastAssistantMessageId;
+  }
+  ensureAssistantMessageId() {
+    if (this.lastAssistantMessageId) {
+      return { emissions: [], messageId: this.lastAssistantMessageId };
+    }
+    return this.ensureMessage("assistant");
   }
   updateOptionsFromPayload(payload) {
     this.currentOptions = parseAcpOptions(payload, this.currentOptions);
@@ -1533,6 +1561,46 @@ async function runAntigravityPrompt(input) {
     const outcome = mapAcpStopReason(rawStop, slot.cancelled);
     for (const flushed of slot.projector.finishTurn(outcome.status === "aborted")) {
       emit(flushed);
+    }
+    const usageRec = asRecord5(promptRes?.usage);
+    if (usageRec) {
+      const inputTokens = typeof usageRec.inputTokens === "number" && Number.isFinite(usageRec.inputTokens) ? usageRec.inputTokens : void 0;
+      const outputTokens = typeof usageRec.outputTokens === "number" && Number.isFinite(usageRec.outputTokens) ? usageRec.outputTokens : void 0;
+      const cachedReadTokens = typeof usageRec.cachedReadTokens === "number" && Number.isFinite(usageRec.cachedReadTokens) ? usageRec.cachedReadTokens : void 0;
+      const cachedWriteTokens = typeof usageRec.cachedWriteTokens === "number" && Number.isFinite(usageRec.cachedWriteTokens) ? usageRec.cachedWriteTokens : void 0;
+      const thoughtTokens = typeof usageRec.thoughtTokens === "number" && Number.isFinite(usageRec.thoughtTokens) ? usageRec.thoughtTokens : void 0;
+      const totalTokens = typeof usageRec.totalTokens === "number" && Number.isFinite(usageRec.totalTokens) ? usageRec.totalTokens : (inputTokens ?? 0) + (outputTokens ?? 0);
+      const assistantMsg = slot.projector.ensureAssistantMessageId();
+      for (const msgEmission of assistantMsg.emissions) {
+        emit(msgEmission);
+      }
+      const messageId = assistantMsg.messageId;
+      const options = slot.projector.getOptions();
+      const currentModelId = options.currentModelId;
+      const currentEffort = options.currentEffortId;
+      emit({
+        type: "agent",
+        event: {
+          type: "usage/finalized",
+          measurement: {
+            measurementId: `${sessionScope.sessionId}:${messageId}:${runId ?? Date.now()}`,
+            sessionId: sessionScope.sessionId,
+            messageId,
+            ...runId !== void 0 ? { runId } : {},
+            ...sessionScope.runtimeGenerationId !== void 0 ? { runtimeGenerationId: sessionScope.runtimeGenerationId } : {},
+            ...currentModelId !== void 0 ? { modelId: currentModelId } : {},
+            ...currentEffort === "low" || currentEffort === "medium" || currentEffort === "high" ? { thinkingLevel: currentEffort } : {},
+            ...inputTokens !== void 0 ? { promptTokens: inputTokens } : {},
+            ...outputTokens !== void 0 ? { completionTokens: outputTokens } : {},
+            ...cachedReadTokens !== void 0 ? { cacheReadTokens: cachedReadTokens } : {},
+            ...cachedWriteTokens !== void 0 ? { cacheWriteTokens: cachedWriteTokens } : {},
+            ...thoughtTokens !== void 0 ? { reasoningTokens: thoughtTokens } : {},
+            totalTokens,
+            stopReason: rawStop,
+            recordedAt: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        }
+      });
     }
     if (outcome.status === "aborted") {
       emit({

@@ -179,6 +179,28 @@ export type AgentFailure = {
 
 export type AgentCompletedStopReason = 'stop' | 'length' | 'toolUse' | 'handled';
 
+export type AssistantUsageMeasurement = {
+  measurementId: string;
+  sessionId: string;
+  runId?: string;
+  runtimeGenerationId?: string;
+  messageId: string;
+  modelId?: string;
+  thinkingLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'extreme';
+  promptTokens?: number;
+  completionTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  totalTokens: number;
+  durationMs?: number;
+  firstTokenMs?: number;
+  timingScope?: 'request' | 'turn';
+  reasoningTokens?: number;
+  firstTokenKind?: 'reasoning' | 'content';
+  stopReason?: string;
+  recordedAt: string;
+};
+
 export type AgentPromptOutcome =
   | { status: 'completed'; stopReason: AgentCompletedStopReason }
   | { status: 'failed'; stopReason: 'error'; failure: AgentFailure }
@@ -228,6 +250,10 @@ export type AgentEvent =
       retriable?: boolean;
       runId?: string;
       failure?: AgentFailure;
+    }
+  | {
+      type: 'usage/finalized';
+      measurement: AssistantUsageMeasurement;
     };
 
 export type AgentPluginMediaProposal = {

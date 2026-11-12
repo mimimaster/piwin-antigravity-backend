@@ -3,7 +3,7 @@
     "schemaVersion": 1,
     "id": "antigravity",
     "name": "Antigravity",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "minHostVersion": "0.0.0",
     "protocol": "piwin-agent-stdio",
     "protocolVersion": 1,
@@ -20,11 +20,12 @@
     "artifact": {
       "format": "node-esm",
       "entrypoint": "dist/agent.mjs",
-      "sha256": "d9e152056e512fa82401bbdc7fdf2a2ff1907525943fd8b2b9ee504afbb9ae4b",
-      "byteSize": 77795
+      "sha256": "5177b193854031decae8a0776231673d75c5546089de070ba0039b167636ddf4",
+      "byteSize": 81569
     },
     "compatibleRevisions": [
-      "27e6ee94bc267fd35d1fe277921449161f0dfb7aa7abc34a1be27d1539aae554"
+      "27e6ee94bc267fd35d1fe277921449161f0dfb7aa7abc34a1be27d1539aae554",
+      "d56d746e57a13f7d84372760a33b42650ba3d85be035b8fbe9c21364f2855eb3"
     ],
     "unversionedBindingCompatible": true,
     "outputDirectories": [

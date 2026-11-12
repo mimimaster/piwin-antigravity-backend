@@ -15,36 +15,42 @@ export const DEFAULT_ANTIGRAVITY_MODELS: readonly BackendModelOption[] = [
     id: 'gemini-4-carbon',
     label: 'Gemini 4 Carbon',
     description: 'Antigravity flagship Gemini 4 Carbon model with configurable thought level',
+    contextTokens: 1_048_576,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS,
   },
   {
     id: 'gemini-4-argon',
     label: 'Gemini 4 Argon',
     description: 'Antigravity Gemini 4 Argon model with configurable thought level',
+    contextTokens: 1_048_576,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS,
   },
   {
     id: 'gemini-3.8-flash',
     label: 'Gemini 3.8 Flash',
     description: 'Fast multimodal Gemini 3.8 Flash model with configurable thought level',
+    contextTokens: 1_048_576,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS,
   },
   {
     id: 'claude-opus-5-5',
     label: 'Claude Opus 5.5',
     description: 'Claude Opus 5.5 on Antigravity',
+    contextTokens: 200_000,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS,
   },
   {
     id: 'claude-sonnet-5-5',
     label: 'Claude Sonnet 5.5',
     description: 'Claude Sonnet 5.5 on Antigravity',
+    contextTokens: 200_000,
     efforts: DEFAULT_ANTIGRAVITY_EFFORTS,
   },
   {
     id: 'gpt-oss-120b-medium',
     label: 'GPT-OSS 120B (Medium)',
     description: 'Open-weight 120B model on Antigravity',
+    contextTokens: 128_000,
   },
 ];
 
