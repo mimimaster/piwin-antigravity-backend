@@ -173,17 +173,17 @@ function createAcpStdio(input) {
 import { accessSync, constants, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-function defaultExists(path) {
+function defaultExists(path2) {
   try {
-    accessSync(path, constants.X_OK);
+    accessSync(path2, constants.X_OK);
     return true;
   } catch {
     return false;
   }
 }
-function defaultFileExists(path) {
+function defaultFileExists(path2) {
   try {
-    accessSync(path, constants.R_OK);
+    accessSync(path2, constants.R_OK);
     return true;
   } catch {
     return false;
@@ -410,10 +410,25 @@ function antigravityCapabilities() {
 }
 
 // src/cli-launch.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+function ensureAntigravityCliSettings() {
+  try {
+    const dir = path.join(os.homedir(), ".gemini", "antigravity-cli");
+    const settingsFile = path.join(dir, "settings.json");
+    if (!fs.existsSync(settingsFile)) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(settingsFile, "{}\n", { encoding: "utf8", mode: 384 });
+    }
+  } catch {
+  }
+}
 function antigravityCliLaunch(backendSessionId) {
   if (!backendSessionId || backendSessionId.trim().length === 0) {
     throw new Error("Cannot launch Antigravity CLI without a bound conversation ID");
   }
+  ensureAntigravityCliSettings();
   return {
     backendSessionId,
     args: ["--conversation", backendSessionId]
@@ -422,8 +437,8 @@ function antigravityCliLaunch(backendSessionId) {
 
 // src/history.ts
 import { readFileSync } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
+import { homedir as homedir3 } from "node:os";
+import { join as join3 } from "node:path";
 
 // src/options.ts
 function asRecord(value) {
@@ -1123,9 +1138,9 @@ var MAX_EVENTS = 2e3;
 function asRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
-function readUtf8(path) {
+function readUtf8(path2) {
   try {
-    return readFileSync(path, "utf8");
+    return readFileSync(path2, "utf8");
   } catch {
     return void 0;
   }
@@ -1137,10 +1152,10 @@ function extractUserRequestText(rawContent) {
   }
   return rawContent.trim();
 }
-function antigravityTranscriptCandidates(sessionId, homeDir = process.env.HOME ?? homedir2()) {
+function antigravityTranscriptCandidates(sessionId, homeDir = process.env.HOME ?? homedir3()) {
   return [
-    join2(homeDir, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl"),
-    join2(homeDir, ".gemini", "antigravity", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl")
+    join3(homeDir, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl"),
+    join3(homeDir, ".gemini", "antigravity", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl")
   ];
 }
 function buildHistoricalToolPresentation(toolName, args) {
@@ -1258,9 +1273,9 @@ import { readFileSync as readFileSync2 } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-function readBytes(path) {
+function readBytes(path2) {
   try {
-    return readFileSync2(path);
+    return readFileSync2(path2);
   } catch {
     return void 0;
   }
