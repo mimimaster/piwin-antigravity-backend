@@ -13,9 +13,11 @@ import {
   AGENT_ID,
   type AcpPort,
   type AgentPluginCatalogEntry,
+  type AgentPluginRequestUsage,
   type Frame,
   type Scope,
 } from './types.js';
+import { readAntigravitySessionRequestUsage } from './usage.js';
 
 export type HostIO = {
   write(frame: Frame): void;
@@ -79,7 +81,14 @@ export class AntigravityPlugin {
           nativeCliLaunch: caps?.nativeCliLaunch === true,
           nativeUserInput: caps?.nativeUserInput === true,
         };
-        this.deps.io.write(okFrame(frame, { agentId: AGENT_ID, protocolVersion: 1, nativeObservation: true }));
+        this.deps.io.write(
+          okFrame(frame, {
+            agentId: AGENT_ID,
+            protocolVersion: 1,
+            requestUsage: true,
+            nativeObservation: true,
+          }),
+        );
         return;
       }
       case 'plugin/dispose': {
@@ -96,7 +105,7 @@ export class AntigravityPlugin {
         await this.catalogList(frame);
         return;
       case 'catalog/usage':
-        this.deps.io.write(okFrame(frame, []));
+        await this.catalogUsage(frame);
         return;
       case 'catalog/native-observe':
         await this.nativeObserve(frame);
@@ -306,6 +315,36 @@ export class AntigravityPlugin {
     }
 
     this.deps.io.write(okFrame(frame, entries));
+  }
+
+  private async catalogUsage(frame: Extract<Frame, { kind: 'request' }>): Promise<void> {
+    const params = asRecord(frame.params);
+    const from = typeof params?.from === 'string' ? params.from : undefined;
+    const rawSessions = Array.isArray(params?.sessions) ? params.sessions : [];
+    const results: AgentPluginRequestUsage[] = [];
+
+    for (const item of rawSessions) {
+      const entry = asRecord(item);
+      const backendSessionId = typeof entry?.backendSessionId === 'string' ? entry.backendSessionId.trim() : '';
+      if (backendSessionId.length === 0) continue;
+      const liveModelId = [...this.sessions.values()].find(
+        (slot) => slot.backendSessionId === backendSessionId,
+      )?.projector.getOptions().currentModelId;
+      const fallbackModelId =
+        typeof entry?.modelId === 'string' && entry.modelId.trim().length > 0
+          ? entry.modelId.trim()
+          : liveModelId;
+      const rows = await readAntigravitySessionRequestUsage({
+        sessionId: backendSessionId,
+        ...(this.deps.homeDir !== undefined ? { homeDir: this.deps.homeDir } : {}),
+        ...(from !== undefined ? { from } : {}),
+        ...(fallbackModelId !== undefined ? { fallbackModelId } : {}),
+        ...(this.deps.fileExists !== undefined ? { fileExists: this.deps.fileExists } : {}),
+      });
+      results.push(...rows);
+    }
+
+    this.deps.io.write(okFrame(frame, results));
   }
 
   private async nativeObserve(frame: Extract<Frame, { kind: 'request' }>): Promise<void> {

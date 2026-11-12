@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 const outfile = join(root, 'dist', 'agent.mjs');
 await mkdir(dirname(outfile), { recursive: true });
 
@@ -16,6 +17,7 @@ await esbuild.build({
   platform: 'node',
   format: 'esm',
   target: 'node22',
+  external: ['node:sqlite'],
   logLevel: 'silent',
 });
 
@@ -26,7 +28,9 @@ const declaration = {
   schemaVersion: 1,
   id: 'antigravity',
   name: 'Antigravity',
-  version: '0.1.2',
+  description: pkg.description,
+  icon: { kind: 'brand', id: 'antigravity' },
+  version: pkg.version,
   minHostVersion: '0.0.0',
   protocol: 'piwin-agent-stdio',
   protocolVersion: 1,
@@ -43,6 +47,9 @@ const declaration = {
   compatibleRevisions: [
     '27e6ee94bc267fd35d1fe277921449161f0dfb7aa7abc34a1be27d1539aae554',
     'd56d746e57a13f7d84372760a33b42650ba3d85be035b8fbe9c21364f2855eb3',
+    '7649e50e1c8d4d007daa4c462dd46e47cb4d744030629da3eb34265c4eebacf6',
+    'ca27eb2f25d3291e7a25140c4c2bf5026015bbff2b958c839acb0946744dfd28',
+    'df3cf50729a5146c3e0e0064a9f13ad03cb3a1eb87fbbb3cac8bd72d95098f72',
   ],
   unversionedBindingCompatible: true,
   outputDirectories: [

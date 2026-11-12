@@ -197,7 +197,25 @@ export type AssistantUsageMeasurement = {
   timingScope?: 'request' | 'turn';
   reasoningTokens?: number;
   firstTokenKind?: 'reasoning' | 'content';
+  costUsd?: number;
   stopReason?: string;
+  recordedAt: string;
+};
+
+export type AgentPluginRequestUsage = {
+  requestId: string;
+  backendSessionId: string;
+  modelId?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  costUsd?: number;
+  totalTokens: number;
+  durationMs?: number;
+  firstTokenMs?: number;
+  firstTokenKind?: 'reasoning' | 'content';
   recordedAt: string;
 };
 

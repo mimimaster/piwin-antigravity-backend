@@ -1584,6 +1584,7 @@ async function runAntigravityPrompt(input) {
       const cachedReadTokens = typeof usageRec.cachedReadTokens === "number" && Number.isFinite(usageRec.cachedReadTokens) ? usageRec.cachedReadTokens : void 0;
       const cachedWriteTokens = typeof usageRec.cachedWriteTokens === "number" && Number.isFinite(usageRec.cachedWriteTokens) ? usageRec.cachedWriteTokens : void 0;
       const thoughtTokens = typeof usageRec.thoughtTokens === "number" && Number.isFinite(usageRec.thoughtTokens) ? usageRec.thoughtTokens : void 0;
+      const costUsd = typeof usageRec.costUsd === "number" && Number.isFinite(usageRec.costUsd) && usageRec.costUsd >= 0 ? usageRec.costUsd : void 0;
       const totalTokens = typeof usageRec.totalTokens === "number" && Number.isFinite(usageRec.totalTokens) ? usageRec.totalTokens : (inputTokens ?? 0) + (outputTokens ?? 0);
       const assistantMsg = slot.projector.ensureAssistantMessageId();
       for (const msgEmission of assistantMsg.emissions) {
@@ -1610,6 +1611,7 @@ async function runAntigravityPrompt(input) {
             ...cachedReadTokens !== void 0 ? { cacheReadTokens: cachedReadTokens } : {},
             ...cachedWriteTokens !== void 0 ? { cacheWriteTokens: cachedWriteTokens } : {},
             ...thoughtTokens !== void 0 ? { reasoningTokens: thoughtTokens } : {},
+            ...costUsd !== void 0 ? { costUsd } : {},
             totalTokens,
             stopReason: rawStop,
             recordedAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -1727,6 +1729,160 @@ async function configureAntigravitySession(input) {
   io2.write(okFrame(frame, updatedOptions));
 }
 
+// src/usage.ts
+import { existsSync as existsSync2 } from "node:fs";
+import { createRequire } from "node:module";
+import { homedir as homedir4 } from "node:os";
+import { join as join4 } from "node:path";
+var nodeRequire = createRequire(import.meta.url);
+var PLANNER_RESPONSE_STEP_TYPE = 15;
+function readVarint(bytes, start) {
+  let result = 0n;
+  let shift = 0n;
+  let pos = start;
+  while (pos < bytes.length) {
+    const byte = bytes[pos];
+    if (byte === void 0) return void 0;
+    pos += 1;
+    result |= BigInt(byte & 127) << shift;
+    if ((byte & 128) === 0) {
+      return { value: Number(result), next: pos };
+    }
+    shift += 7n;
+    if (shift > 63n) return void 0;
+  }
+  return void 0;
+}
+function decodeProtobufFields(bytes) {
+  const fields = /* @__PURE__ */ new Map();
+  let pos = 0;
+  while (pos < bytes.length) {
+    const tag = readVarint(bytes, pos);
+    if (!tag) break;
+    pos = tag.next;
+    const fieldNumber = tag.value >>> 3;
+    const wireType = tag.value & 7;
+    if (fieldNumber <= 0) break;
+    if (wireType === 0) {
+      const val = readVarint(bytes, pos);
+      if (!val) break;
+      pos = val.next;
+      fields.set(fieldNumber, val.value);
+    } else if (wireType === 2) {
+      const len = readVarint(bytes, pos);
+      if (!len || len.value < 0 || len.next + len.value > bytes.length) break;
+      fields.set(fieldNumber, bytes.subarray(len.next, len.next + len.value));
+      pos = len.next + len.value;
+    } else if (wireType === 1) {
+      if (pos + 8 > bytes.length) break;
+      pos += 8;
+    } else if (wireType === 5) {
+      if (pos + 4 > bytes.length) break;
+      pos += 4;
+    } else {
+      break;
+    }
+  }
+  return fields;
+}
+function decodeTimestampMs(value) {
+  if (!(value instanceof Uint8Array)) return void 0;
+  const fields = decodeProtobufFields(value);
+  const seconds = fields.get(1);
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return void 0;
+  const nanosRaw = fields.get(2);
+  const nanos = typeof nanosRaw === "number" && Number.isFinite(nanosRaw) && nanosRaw > 0 ? nanosRaw : 0;
+  return seconds * 1e3 + Math.floor(nanos / 1e6);
+}
+function asNonNegativeInt(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return void 0;
+  return Math.trunc(value);
+}
+function parseAntigravityStepMetadataUsage(input) {
+  const top = decodeProtobufFields(input.metadata);
+  const createdAtMs = decodeTimestampMs(top.get(1));
+  const modelUsageBytes = top.get(9);
+  if (createdAtMs === void 0 || !(modelUsageBytes instanceof Uint8Array)) {
+    return void 0;
+  }
+  const usage = decodeProtobufFields(modelUsageBytes);
+  const promptTokens = asNonNegativeInt(usage.get(2));
+  const completionTokens = asNonNegativeInt(usage.get(3));
+  const cacheWriteTokens = asNonNegativeInt(usage.get(4));
+  const cacheReadTokens = asNonNegativeInt(usage.get(5));
+  const reasoningTokens = asNonNegativeInt(usage.get(9));
+  const totalTokens = (promptTokens ?? 0) + (completionTokens ?? 0) + (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0);
+  if (totalTokens <= 0) return void 0;
+  const rawRequestId = usage.get(7);
+  const decodedRequestId = rawRequestId instanceof Uint8Array ? Buffer.from(rawRequestId).toString("utf8").trim() : "";
+  const requestId = decodedRequestId.length > 0 ? decodedRequestId : `${input.sessionId}:step-${input.stepIndex}`;
+  const firstTokenAtMs = decodeTimestampMs(top.get(6));
+  const completedAtMs = decodeTimestampMs(top.get(7));
+  const firstTokenMs = firstTokenAtMs !== void 0 && firstTokenAtMs >= createdAtMs ? firstTokenAtMs - createdAtMs : void 0;
+  const durationMs = completedAtMs !== void 0 && completedAtMs >= createdAtMs ? completedAtMs - createdAtMs : void 0;
+  const firstTokenKind = reasoningTokens !== void 0 && reasoningTokens > 0 ? "reasoning" : "content";
+  const modelId = input.fallbackModelId?.trim();
+  return {
+    requestId,
+    backendSessionId: input.sessionId,
+    ...modelId ? { modelId } : {},
+    ...promptTokens !== void 0 ? { promptTokens } : {},
+    ...completionTokens !== void 0 ? { completionTokens } : {},
+    ...cacheReadTokens !== void 0 ? { cacheReadTokens } : {},
+    ...cacheWriteTokens !== void 0 ? { cacheWriteTokens } : {},
+    ...reasoningTokens !== void 0 ? { reasoningTokens } : {},
+    totalTokens,
+    ...durationMs !== void 0 ? { durationMs } : {},
+    ...firstTokenMs !== void 0 ? { firstTokenMs } : {},
+    ...firstTokenMs !== void 0 || durationMs !== void 0 ? { firstTokenKind } : {},
+    recordedAt: new Date(createdAtMs).toISOString()
+  };
+}
+function isSafeSessionId(sessionId) {
+  return sessionId.length > 0 && !sessionId.includes("/") && !sessionId.includes("\\") && !sessionId.includes("..");
+}
+async function readAntigravitySessionRequestUsage(input) {
+  const sessionId = input.sessionId.trim();
+  if (!isSafeSessionId(sessionId)) return [];
+  const home = input.homeDir ?? homedir4();
+  const checkExists = input.fileExists ?? existsSync2;
+  const candidates = [
+    join4(home, ".gemini", "antigravity-cli", "conversations", `${sessionId}.db`),
+    join4(home, ".gemini", "antigravity", "conversations", `${sessionId}.db`)
+  ];
+  const dbPath = candidates.find((candidate) => checkExists(candidate));
+  if (!dbPath) return [];
+  const fromMs = input.from !== void 0 ? Date.parse(input.from) : Number.NaN;
+  try {
+    const { DatabaseSync } = nodeRequire("node:sqlite");
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const rows = db.prepare("SELECT idx, metadata FROM steps WHERE step_type = ? ORDER BY idx ASC").all(PLANNER_RESPONSE_STEP_TYPE);
+      const seenIds = /* @__PURE__ */ new Set();
+      const results = [];
+      for (const row of rows) {
+        if (!(row.metadata instanceof Uint8Array)) continue;
+        const stepIndex = typeof row.idx === "number" && Number.isFinite(row.idx) ? row.idx : 0;
+        const parsed = parseAntigravityStepMetadataUsage({
+          sessionId,
+          stepIndex,
+          metadata: row.metadata,
+          ...input.fallbackModelId !== void 0 ? { fallbackModelId: input.fallbackModelId } : {}
+        });
+        if (!parsed || seenIds.has(parsed.requestId)) continue;
+        if (Number.isFinite(fromMs) && Date.parse(parsed.recordedAt) < fromMs) continue;
+        seenIds.add(parsed.requestId);
+        results.push(parsed);
+      }
+      return results;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
 // src/plugin.ts
 function asRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
@@ -1762,7 +1918,14 @@ var AntigravityPlugin = class {
           nativeCliLaunch: caps?.nativeCliLaunch === true,
           nativeUserInput: caps?.nativeUserInput === true
         };
-        this.deps.io.write(okFrame(frame, { agentId: AGENT_ID, protocolVersion: 1, nativeObservation: true }));
+        this.deps.io.write(
+          okFrame(frame, {
+            agentId: AGENT_ID,
+            protocolVersion: 1,
+            requestUsage: true,
+            nativeObservation: true
+          })
+        );
         return;
       }
       case "plugin/dispose": {
@@ -1779,7 +1942,7 @@ var AntigravityPlugin = class {
         await this.catalogList(frame);
         return;
       case "catalog/usage":
-        this.deps.io.write(okFrame(frame, []));
+        await this.catalogUsage(frame);
         return;
       case "catalog/native-observe":
         await this.nativeObserve(frame);
@@ -1972,6 +2135,30 @@ var AntigravityPlugin = class {
       });
     }
     this.deps.io.write(okFrame(frame, entries));
+  }
+  async catalogUsage(frame) {
+    const params = asRecord6(frame.params);
+    const from = typeof params?.from === "string" ? params.from : void 0;
+    const rawSessions = Array.isArray(params?.sessions) ? params.sessions : [];
+    const results = [];
+    for (const item of rawSessions) {
+      const entry = asRecord6(item);
+      const backendSessionId = typeof entry?.backendSessionId === "string" ? entry.backendSessionId.trim() : "";
+      if (backendSessionId.length === 0) continue;
+      const liveModelId = [...this.sessions.values()].find(
+        (slot) => slot.backendSessionId === backendSessionId
+      )?.projector.getOptions().currentModelId;
+      const fallbackModelId = typeof entry?.modelId === "string" && entry.modelId.trim().length > 0 ? entry.modelId.trim() : liveModelId;
+      const rows = await readAntigravitySessionRequestUsage({
+        sessionId: backendSessionId,
+        ...this.deps.homeDir !== void 0 ? { homeDir: this.deps.homeDir } : {},
+        ...from !== void 0 ? { from } : {},
+        ...fallbackModelId !== void 0 ? { fallbackModelId } : {},
+        ...this.deps.fileExists !== void 0 ? { fileExists: this.deps.fileExists } : {}
+      });
+      results.push(...rows);
+    }
+    this.deps.io.write(okFrame(frame, results));
   }
   async nativeObserve(frame) {
     const params = asRecord6(frame.params);

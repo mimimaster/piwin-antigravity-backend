@@ -234,7 +234,12 @@ describe('AntigravityPlugin full loopback', () => {
     );
     expect(written.at(-1)).toMatchObject({
       ok: true,
-      result: { agentId: 'antigravity', protocolVersion: 1, nativeObservation: true },
+      result: {
+        agentId: 'antigravity',
+        protocolVersion: 1,
+        requestUsage: true,
+        nativeObservation: true,
+      },
     });
 
     await plugin.handle(req('check', { refresh: true }));

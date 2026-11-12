@@ -365,6 +365,10 @@ export async function runAntigravityPrompt(input: {
         typeof usageRec.thoughtTokens === 'number' && Number.isFinite(usageRec.thoughtTokens)
           ? usageRec.thoughtTokens
           : undefined;
+      const costUsd =
+        typeof usageRec.costUsd === 'number' && Number.isFinite(usageRec.costUsd) && usageRec.costUsd >= 0
+          ? usageRec.costUsd
+          : undefined;
       const totalTokens =
         typeof usageRec.totalTokens === 'number' && Number.isFinite(usageRec.totalTokens)
           ? usageRec.totalTokens
@@ -400,6 +404,7 @@ export async function runAntigravityPrompt(input: {
             ...(cachedReadTokens !== undefined ? { cacheReadTokens: cachedReadTokens } : {}),
             ...(cachedWriteTokens !== undefined ? { cacheWriteTokens: cachedWriteTokens } : {}),
             ...(thoughtTokens !== undefined ? { reasoningTokens: thoughtTokens } : {}),
+            ...(costUsd !== undefined ? { costUsd } : {}),
             totalTokens,
             stopReason: rawStop,
             recordedAt: new Date().toISOString(),
